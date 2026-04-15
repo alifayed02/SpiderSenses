@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "spidey-senses",
+  "version": "1.0.0",
+  "name": "Spidey Senses",
+  "description": "Displays a red vignette when hostile mobs are near the player.",
+  "authors": [],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.example.spideysenses.SpideySensesClient"
+    ]
+  },
+  "mixins": [
+    "spidey-senses.mixins.json"
+  ],
+  "depends": {
+    "fabric-api": "*",
+    "fabricloader": ">=0.19.1",
+    "java": ">=25",
+    "minecraft": "*"
+  }
+}

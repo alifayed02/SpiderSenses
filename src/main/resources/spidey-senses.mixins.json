@@ -1,0 +1,15 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "com.example.spideysenses.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "CameraMixin",
+    "GameRendererAccessor",
+    "PostChainAccessor",
+    "PostPassAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

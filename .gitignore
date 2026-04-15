@@ -1,0 +1,22 @@
+# Build output
+build/
+.fabric/
+
+# Dev Minecraft instance (managed by Elide/WHIPLASH)
+.minecraft/
+mods/
+downloads/
+data/
+config/
+resourcepacks/
+
+# Runtime game state
+logs/
+crash-reports/
+saves/
+options.txt
+usercache.json
+command_history.txt
+
+# macOS
+.DS_Store
