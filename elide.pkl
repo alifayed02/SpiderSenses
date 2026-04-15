@@ -6,3 +6,12 @@ version = "1.0.0"
 jvm {
   target = 25
 }
+
+mixins {
+  scripts {
+    "src/main/scripts"
+  }
+  languages {
+    "python"
+  }
+}

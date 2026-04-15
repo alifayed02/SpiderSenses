@@ -13,7 +13,8 @@
     ]
   },
   "mixins": [
-    "spidey-senses.mixins.json"
+    "spidey-senses.mixins.json",
+    "polyglot.mixins.json"
   ],
   "depends": {
     "fabric-api": "*",

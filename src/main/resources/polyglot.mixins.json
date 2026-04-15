@@ -1,0 +1,11 @@
+{
+  "compatibilityLevel": "JAVA_21",
+  "injectors": {
+    "defaultRequire": 1
+  },
+  "minVersion": "0.8",
+  "mixins": [],
+  "package": "dev.elide.lang.minecraft.polyglot.bridge",
+  "plugin": "dev.elide.lang.minecraft.PolyglotMixinPlugin",
+  "required": true
+}
