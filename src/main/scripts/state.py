@@ -200,7 +200,7 @@ def _update_post_effect(client):
         return
     should_apply = effect_active()
     if should_apply and not _effect_applied:
-        getattr(renderer, "spideysenses$setPostEffect")(CHROMATIC_EFFECT)
+        renderer.spideysenses_setPostEffect(CHROMATIC_EFFECT)
         _effect_applied = True
     elif not should_apply and _effect_applied:
         if CHROMATIC_EFFECT.equals(renderer.currentPostEffect()):
@@ -260,8 +260,8 @@ def _push_chromatic_uniforms(client):
     )
     if chain is None:
         return
-    for pass_ in getattr(chain, "spideysenses$passes")():
-        uniforms_map = getattr(pass_, "spideysenses$customUniforms")()
+    for pass_ in chain.spideysenses_passes():
+        uniforms_map = pass_.spideysenses_customUniforms()
         if uniforms_map.containsKey("AberrationConfig"):
             _write_floats(uniforms_map, "AberrationConfig", [distort])
 
@@ -299,8 +299,8 @@ def _push_sense_world_uniforms(chain, camera):
         float(pos.x), float(pos.y), float(pos.z), 0.0,
     ] + m
 
-    for pass_ in getattr(chain, "spideysenses$passes")():
-        u = getattr(pass_, "spideysenses$customUniforms")()
+    for pass_ in chain.spideysenses_passes():
+        u = pass_.spideysenses_customUniforms()
         if u.containsKey("SenseConfig"):
             _write_floats(u, "SenseConfig", sense_uniforms)
         if u.containsKey("SharpenConfig"):

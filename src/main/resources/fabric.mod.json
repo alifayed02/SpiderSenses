@@ -13,7 +13,6 @@
     ]
   },
   "mixins": [
-    "spidey-senses.mixins.json",
     "polyglot.mixins.json"
   ],
   "depends": {
