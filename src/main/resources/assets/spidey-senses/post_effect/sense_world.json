@@ -1,0 +1,67 @@
+{
+    "targets": {
+        "sense_swap": {},
+        "sharpen_swap": {}
+    },
+    "passes": [
+        {
+            "vertex_shader": "minecraft:core/screenquad",
+            "fragment_shader": "spidey-senses:post/spidey_sense_world",
+            "inputs": [
+                {
+                    "sampler_name": "Main",
+                    "target": "minecraft:main"
+                },
+                {
+                    "sampler_name": "MainDepth",
+                    "target": "minecraft:main",
+                    "use_depth_buffer": true
+                }
+            ],
+            "output": "sense_swap",
+            "uniforms": {
+                "SenseConfig": [
+                    { "name": "Radius",       "type": "float", "value": 0.0 },
+                    { "name": "EdgeSoftness", "type": "float", "value": 2.0 },
+                    { "name": "Strength",     "type": "float", "value": 0.0 },
+                    { "name": "Darkness",     "type": "float", "value": 0.0 },
+                    { "name": "CameraPos",       "type": "vec4", "value": [ 0.0, 0.0, 0.0, 0.0 ] },
+                    { "name": "InverseViewProj", "type": "matrix4x4",
+                      "value": [ 1.0, 0.0, 0.0, 0.0,
+                                 0.0, 1.0, 0.0, 0.0,
+                                 0.0, 0.0, 1.0, 0.0,
+                                 0.0, 0.0, 0.0, 1.0 ] }
+                ]
+            }
+        },
+        {
+            "vertex_shader": "minecraft:core/screenquad",
+            "fragment_shader": "spidey-senses:post/sense_sharpen",
+            "inputs": [
+                { "sampler_name": "In", "target": "sense_swap" }
+            ],
+            "output": "sharpen_swap",
+            "uniforms": {
+                "SharpenConfig": [
+                    { "name": "Amount", "type": "float", "value": 0.0 }
+                ]
+            }
+        },
+        {
+            "vertex_shader": "minecraft:core/screenquad",
+            "fragment_shader": "spidey-senses:post/sense_zoom_blur",
+            "inputs": [
+                { "sampler_name": "In", "target": "sharpen_swap" }
+            ],
+            "output": "minecraft:main",
+            "uniforms": {
+                "ZoomBlurConfig": [
+                    { "name": "Strength", "type": "float", "value": 0.0 },
+                    { "name": "_pad1",    "type": "float", "value": 0.0 },
+                    { "name": "_pad2",    "type": "float", "value": 0.0 },
+                    { "name": "_pad3",    "type": "float", "value": 0.0 }
+                ]
+            }
+        }
+    ]
+}

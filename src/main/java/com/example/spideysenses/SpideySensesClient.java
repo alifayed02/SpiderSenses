@@ -4,23 +4,24 @@ import com.example.spideysenses.mixin.GameRendererAccessor;
 import com.example.spideysenses.mixin.PostChainAccessor;
 import com.example.spideysenses.mixin.PostPassAccessor;
 import com.mojang.blaze3d.buffers.GpuBuffer;
+import com.mojang.blaze3d.resource.GraphicsResourceAllocator;
 import com.mojang.blaze3d.systems.RenderSystem;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.HudElementRegistry;
-import net.fabricmc.fabric.api.client.rendering.v1.hud.VanillaHudElements;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.GameRenderer;
 import net.minecraft.client.renderer.LevelTargetBundle;
 import net.minecraft.client.renderer.PostChain;
 import net.minecraft.client.renderer.PostPass;
+import net.minecraft.client.renderer.state.level.CameraRenderState;
 import net.minecraft.resources.Identifier;
+import net.minecraft.world.phys.Vec3;
+import org.joml.Matrix4f;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
-import java.util.List;
 import java.util.Map;
 
 public class SpideySensesClient implements ClientModInitializer {
@@ -32,13 +33,17 @@ public class SpideySensesClient implements ClientModInitializer {
     public static final float REARM_THRESHOLD = 0.20f;
     public static final int EFFECT_DURATION_TICKS = 100;
     public static final float HOLD_FRACTION = 0.20f;
-    public static final float MAX_CHROMATIC_DISTORT = 4.5f;
-    public static final float MAX_SHARPEN_AMOUNT = 0.50f;
+    public static final float MAX_CHROMATIC_DISTORT = 3.2f;
+    public static final float SENSE_EDGE_SOFTNESS = 3.0f;
+    public static final float MAX_SHARPEN_AMOUNT = 0.30f;
+    public static final float MAX_ZOOM_BLUR = 0.0f;
 
     public static final ThreatTracker THREAT = new ThreatTracker(DETECTION_RADIUS);
 
     private static final Identifier CHROMATIC_EFFECT =
         Identifier.fromNamespaceAndPath(MOD_ID, "chromatic");
+    private static final Identifier SENSE_WORLD_EFFECT =
+        Identifier.fromNamespaceAndPath(MOD_ID, "sense_world");
 
     private static volatile int triggerTicks = -1;
     private static boolean armed = true;
@@ -52,14 +57,8 @@ public class SpideySensesClient implements ClientModInitializer {
             THREAT.tick(client);
             advanceTrigger();
             updatePostEffect(client);
-            pushEffectUniforms(client);
+            pushChromaticUniforms(client);
         });
-
-        HudElementRegistry.attachElementAfter(
-            VanillaHudElements.MISC_OVERLAYS,
-            Identifier.fromNamespaceAndPath(MOD_ID, "vignette"),
-            new VignetteHudElement()
-        );
     }
 
     private static void advanceTrigger() {
@@ -96,10 +95,6 @@ public class SpideySensesClient implements ClientModInitializer {
         return 1.0f - smoothstep((progress - holdEnd) / (1.0f - holdEnd));
     }
 
-    public static float effectTicks(float subTick) {
-        return triggerTicks < 0 ? -1.0f : triggerTicks + subTick;
-    }
-
     public static float fovEnvelope(float subTick) {
         if (triggerTicks < 0) return 0.0f;
         float progress = (triggerTicks + subTick) / (float) EFFECT_DURATION_TICKS;
@@ -116,12 +111,9 @@ public class SpideySensesClient implements ClientModInitializer {
         return t * t * (3.0f - 2.0f * t);
     }
 
-    private static void pushEffectUniforms(Minecraft client) {
+    private static void pushChromaticUniforms(Minecraft client) {
         if (!effectActive()) return;
-        float env = envelope(0.0f);
-        float distort = MAX_CHROMATIC_DISTORT * env;
-        float sharpen = MAX_SHARPEN_AMOUNT * env;
-
+        float distort = MAX_CHROMATIC_DISTORT * envelope(0.0f);
         PostChain chain = client.getShaderManager()
             .getPostChain(CHROMATIC_EFFECT, LevelTargetBundle.MAIN_TARGETS);
         if (chain == null) return;
@@ -131,8 +123,61 @@ public class SpideySensesClient implements ClientModInitializer {
             if (uniforms.containsKey("AberrationConfig")) {
                 writeFloats(uniforms, "AberrationConfig", new float[]{distort});
             }
-            if (uniforms.containsKey("SharpenConfig")) {
-                writeFloats(uniforms, "SharpenConfig", new float[]{sharpen});
+        }
+    }
+
+    public static void runWorldSenseEffect(GraphicsResourceAllocator allocator,
+                                            CameraRenderState camera) {
+        if (!effectActive()) return;
+        if (camera == null || camera.projectionMatrix == null
+            || camera.viewRotationMatrix == null || camera.pos == null) return;
+
+        Minecraft client = Minecraft.getInstance();
+        PostChain chain = client.getShaderManager()
+            .getPostChain(SENSE_WORLD_EFFECT, LevelTargetBundle.MAIN_TARGETS);
+        if (chain == null) return;
+
+        pushSenseWorldUniforms(chain, camera);
+        chain.process(client.getMainRenderTarget(), allocator);
+    }
+
+    private static void pushSenseWorldUniforms(PostChain chain, CameraRenderState camera) {
+        float env = envelope(0.0f);
+        float maxRadius = camera.depthFar > 0.0f ? camera.depthFar : 512.0f;
+        float radius = maxRadius * env;
+        float strength = env;
+
+        Vec3 pos = camera.pos;
+        Matrix4f view = new Matrix4f(camera.viewRotationMatrix)
+            .translate((float) -pos.x, (float) -pos.y, (float) -pos.z);
+        Matrix4f invViewProj = new Matrix4f(camera.projectionMatrix).mul(view).invert();
+        float[] m = new float[16];
+        invViewProj.get(m);
+
+        float[] uniforms = new float[] {
+            radius, SENSE_EDGE_SOFTNESS, strength, 0.0f,
+            (float) pos.x, (float) pos.y, (float) pos.z, 0.0f,
+            m[0], m[1], m[2], m[3],
+            m[4], m[5], m[6], m[7],
+            m[8], m[9], m[10], m[11],
+            m[12], m[13], m[14], m[15]
+        };
+
+        float sharpen = MAX_SHARPEN_AMOUNT * env;
+        float zoomBlur = MAX_ZOOM_BLUR * fovEnvelope(0.0f);
+
+        for (PostPass pass : ((PostChainAccessor) chain).spideysenses$passes()) {
+            Map<String, GpuBuffer> u =
+                ((PostPassAccessor) pass).spideysenses$customUniforms();
+            if (u.containsKey("SenseConfig")) {
+                writeFloats(u, "SenseConfig", uniforms);
+            }
+            if (u.containsKey("SharpenConfig")) {
+                writeFloats(u, "SharpenConfig", new float[]{sharpen});
+            }
+            if (u.containsKey("ZoomBlurConfig")) {
+                writeFloats(u, "ZoomBlurConfig",
+                    new float[]{zoomBlur, 0.0f, 0.0f, 0.0f});
             }
         }
     }
