@@ -80,12 +80,15 @@ void main() {
     // World-stable noise drives region shape.
     float noise = fbm(worldPos.xz * 0.08 + vec2(worldPos.y * 0.05, 0.0));
 
-    // Depth-driven rings emanating from the player — visually ties the split
-    // to the sphere wavefront and guarantees distant vs near blocks differ.
-    float depthBand = 0.5 + 0.5 * sin(dist * 0.25);
+    // Raw depth-buffer banding. The depth buffer is exponentially non-linear,
+    // so this produces tight rings near the player that widen with distance.
+    float rawDepthPattern = 0.5 + 0.5 * sin(depth * 120.0);
 
-    float rawSplit = clamp(0.55 * noise + 0.35 * depthBand + 0.10 * splitX,
-                           0.0, 1.0);
+    float rawSplit = clamp(
+          0.55 * noise
+        + 0.35 * rawDepthPattern
+        + 0.10 * splitX,
+        0.0, 1.0);
 
     // Narrow smoothstep pushes the factor toward 0 or 1, so pixels commit
     // to mostly-red or mostly-blue with only a thin transition band.
