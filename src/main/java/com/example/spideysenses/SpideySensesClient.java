@@ -32,6 +32,7 @@ public class SpideySensesClient implements ClientModInitializer {
     public static final float TRIGGER_THRESHOLD = 0.40f;
     public static final float REARM_THRESHOLD = 0.20f;
     public static final int EFFECT_DURATION_TICKS = 100;
+    public static final int COOLDOWN_TICKS = 600;
     public static final float HOLD_FRACTION = 0.20f;
     public static final float MAX_CHROMATIC_DISTORT = 3.2f;
     public static final float SENSE_EDGE_SOFTNESS = 3.0f;
@@ -46,6 +47,7 @@ public class SpideySensesClient implements ClientModInitializer {
         Identifier.fromNamespaceAndPath(MOD_ID, "sense_world");
 
     private static volatile int triggerTicks = -1;
+    private static volatile int cooldownTicks = 0;
     private static boolean armed = true;
     private static boolean effectApplied = false;
 
@@ -64,9 +66,11 @@ public class SpideySensesClient implements ClientModInitializer {
     private static void advanceTrigger() {
         float threat = THREAT.level();
         if (threat < REARM_THRESHOLD) armed = true;
-        if (armed && threat >= TRIGGER_THRESHOLD && triggerTicks < 0) {
+        if (cooldownTicks > 0) cooldownTicks--;
+        if (armed && threat >= TRIGGER_THRESHOLD && triggerTicks < 0 && cooldownTicks == 0) {
             triggerTicks = 0;
             armed = false;
+            cooldownTicks = COOLDOWN_TICKS;
         }
         if (triggerTicks >= 0) {
             triggerTicks++;

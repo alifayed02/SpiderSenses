@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.injection.At;
 
 @Mixin(Camera.class)
 public class CameraMixin {
-    private static final float MAX_FOV_GAIN = 0.22f;
+    private static final float MAX_FOV_GAIN = 0.12f;
 
     @ModifyReturnValue(method = "calculateFov(F)F", at = @At("RETURN"))
     private float spideysenses$warpFov(float original, float partialTick) {
