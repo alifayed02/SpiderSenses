@@ -1,41 +1,30 @@
-"""
-Core state and per-tick logic for Spidey Senses.
+"""State, threat tracking, envelope curves, and per-tick logic.
 
-Ported from SpideySensesClient.java + ThreatTracker.java. All module-level
-definitions share Python's __main__ namespace with the mixin scripts, so
-camera_fov.py / lightmap.py / level_renderer.py can reference `envelope`,
-`fov_envelope`, `run_world_sense_effect` by bare name.
+Module-level definitions are shared with sibling mixin scripts via the
+polyglot context's single global namespace, so camera_fov.py,
+lightmap.py, and level_renderer.py can reference `envelope`,
+`fov_envelope`, and `run_world_sense_effect` by bare name.
 """
 
 import java
-import jarray
-import polyglot
 
-from elide.minecraft import mixin  # noqa: F401 — keeps elide/minecraft importable
+from elide.minecraft import mixin  # noqa: F401
 
-# GraalPy's `PFloat.fitsInFloat(d)` returns true only when (double)(float)d == d.
-# Most Python floats (64-bit) lose precision on float32 narrowing, so Java-float
-# boundaries (farr[i] = v, state.floatField = v, return-value of a float-returning
-# mixin) reject them outright. `register_interop_behavior` doesn't help — the
-# native PFloat trait dispatches first on built-ins and before subclasses too.
-#
-# Workaround: pre-narrow each value through a Java round-trip. `.floatValue()`
-# on a boxed Double returns a Java `float` primitive; when it crosses back to
-# Python it's a Python `float` whose value is already exactly representable in
-# 32-bit float — so every later fitsInFloat check succeeds.
 _JavaFloat = java.type("java.lang.Float")
 
 
 def jf(v):
-    """Round `v` to the nearest 32-bit-representable double.
+    """Narrow a Python double to a 32-bit-representable double.
 
-    Goes via String because `Float.parseFloat(str)` does the narrowing
-    inside the JVM — no Python float ever crosses the fitsInFloat check.
-    The returned Java float widens back to a Python float whose value
-    is already at float32 granularity, so later assignments pass."""
+    GraalPy rejects assignment of a Python 64-bit float into a Java
+    32-bit float slot unless the value round-trips losslessly through
+    float32. Routing through `Float.parseFloat(str)` performs the
+    narrowing inside the JVM and returns a value that passes the
+    check at every later Java-float boundary.
+    """
     return _JavaFloat.parseFloat(str(v))
 
-# --- Java type handles (looked up once, reused) ---
+
 Minecraft          = java.type("net.minecraft.client.Minecraft")
 Identifier         = java.type("net.minecraft.resources.Identifier")
 LevelTargetBundle  = java.type("net.minecraft.client.renderer.LevelTargetBundle")
@@ -43,32 +32,28 @@ GpuBuffer          = java.type("com.mojang.blaze3d.buffers.GpuBuffer")
 RenderSystem       = java.type("com.mojang.blaze3d.systems.RenderSystem")
 Matrix4f           = java.type("org.joml.Matrix4f")
 ByteBuffer         = java.type("java.nio.ByteBuffer")
-FloatBuffer        = java.type("java.nio.FloatBuffer")
-_FloatArrayType    = java.type("float[]")
-# _JavaFloat defined above next to the jf() helper.
 ByteOrder          = java.type("java.nio.ByteOrder")
 Enemy              = java.type("net.minecraft.world.entity.monster.Enemy")
 SpideySensesClient = java.type("com.example.spideysenses.SpideySensesClient")
+_FloatArrayType    = java.type("float[]")
 
-# --- Constants (mirror the Java versions) ---
-MOD_ID                 = "spidey-senses"
-DETECTION_RADIUS       = 16.0
-DETECTION_RADIUS_SQR   = DETECTION_RADIUS * DETECTION_RADIUS
-TRIGGER_THRESHOLD      = 0.40
-REARM_THRESHOLD        = 0.20
-EFFECT_DURATION_TICKS  = 100
-HOLD_FRACTION          = 0.20
-COOLDOWN_TICKS         = 600
-MAX_CHROMATIC_DISTORT  = 3.2
-SENSE_EDGE_SOFTNESS    = 3.0
-MAX_SHARPEN_AMOUNT     = 0.30
-MAX_ZOOM_BLUR          = 0.0
-COS_HALF_FOV           = 0.5
+MOD_ID                = "spidey-senses"
+DETECTION_RADIUS      = 16.0
+DETECTION_RADIUS_SQR  = DETECTION_RADIUS * DETECTION_RADIUS
+TRIGGER_THRESHOLD     = 0.40
+REARM_THRESHOLD       = 0.20
+EFFECT_DURATION_TICKS = 100
+HOLD_FRACTION         = 0.20
+COOLDOWN_TICKS        = 600
+MAX_CHROMATIC_DISTORT = 3.2
+SENSE_EDGE_SOFTNESS   = 3.0
+MAX_SHARPEN_AMOUNT    = 0.30
+MAX_ZOOM_BLUR         = 0.0
+COS_HALF_FOV          = 0.5
 
 CHROMATIC_EFFECT   = Identifier.fromNamespaceAndPath(MOD_ID, "chromatic")
 SENSE_WORLD_EFFECT = Identifier.fromNamespaceAndPath(MOD_ID, "sense_world")
 
-# --- Mutable state (kept at module level so it persists across calls) ---
 _threat         = 0.0
 _trigger_ticks  = -1
 _cooldown_ticks = 0
@@ -77,12 +62,9 @@ _effect_applied = False
 
 
 def prime():
-    """No-op called once at mod init to force the module to be eval'd,
-    so its globals are available when mixin scripts later fire."""
+    """Forces the module to evaluate, seeding shared state for mixin scripts."""
     return None
 
-
-# ---------------- Threat tracking (ports ThreatTracker.java) ----------------
 
 def _decay_threat():
     global _threat
@@ -128,22 +110,15 @@ def _threat_tick(client):
     _threat = _threat + (target - _threat) * smoothing
 
 
-# ---------------- Trigger state machine ----------------
-
 def _advance_trigger():
-    global _trigger_ticks, _armed, _cooldown_ticks
+    global _trigger_ticks, _armed
 
     if _threat < REARM_THRESHOLD:
         _armed = True
 
-    # Cooldown is currently disabled (mirrors the Java commented-out block).
-    # if _cooldown_ticks > 0:
-    #     _cooldown_ticks -= 1
-
     if _armed and _threat >= TRIGGER_THRESHOLD and _trigger_ticks < 0:
         _trigger_ticks = 0
         _armed = False
-        # _cooldown_ticks = COOLDOWN_TICKS
 
     if _trigger_ticks >= 0:
         _trigger_ticks += 1
@@ -165,6 +140,7 @@ def _smoothstep(t):
 
 
 def envelope(sub_tick):
+    """Rise / hold / fall curve over EFFECT_DURATION_TICKS."""
     if _trigger_ticks < 0:
         return 0.0
     progress = (_trigger_ticks + sub_tick) / EFFECT_DURATION_TICKS
@@ -180,6 +156,7 @@ def envelope(sub_tick):
 
 
 def fov_envelope(sub_tick):
+    """Single-peak curve for the FOV warp."""
     if _trigger_ticks < 0:
         return 0.0
     progress = (_trigger_ticks + sub_tick) / EFFECT_DURATION_TICKS
@@ -190,8 +167,6 @@ def fov_envelope(sub_tick):
         return _smoothstep(progress / peak)
     return 1.0 - _smoothstep((progress - peak) / (1.0 - peak))
 
-
-# ---------------- Post-effect activation ----------------
 
 def _update_post_effect(client):
     global _effect_applied
@@ -208,19 +183,7 @@ def _update_post_effect(client):
         _effect_applied = False
 
 
-# ---------------- Uniform pushing ----------------
-
-_JavaSystem = java.type("java.lang.System")
-
-
-def _log(msg):
-    _JavaSystem.err.println("[spidey-wf] " + str(msg))
-
-
 def _fill_bytebuffer_with_floats(byte_buffer, values):
-    """Writes `values` (Python floats) as 32-bit IEEE-754 little-endian
-    into `byte_buffer` at offset 0 via a Java float[] + FloatBuffer view.
-    Each value is pre-narrowed via jf() so the setArrayElement check passes."""
     n = len(values)
     farr = _FloatArrayType(n)
     for i, v in enumerate(values):
@@ -229,12 +192,13 @@ def _fill_bytebuffer_with_floats(byte_buffer, values):
 
 
 def _write_floats(uniforms_map, key, values):
+    """Write `values` into the named uniform buffer, upgrading it to
+    COPY_DST on first use (vanilla UBOs are allocated without the flag)."""
     buf = uniforms_map.get(key)
     if buf is None:
         return
     byte_count = len(values) * 4
     if (buf.usage() & GpuBuffer.USAGE_COPY_DST) == 0:
-        # Upgrade path: allocate new buffer with COPY_DST and seed with values.
         size = int(buf.size())
         initial = ByteBuffer.allocateDirect(size)
         _fill_bytebuffer_with_floats(initial, values)
@@ -242,7 +206,6 @@ def _write_floats(uniforms_map, key, values):
         replacement = SpideySensesClient.upgradeBuffer(buf, MOD_ID + "-" + key, initial)
         uniforms_map.put(key, replacement)
         return
-    # Fast path: buffer already COPY_DST, just write.
     bb = ByteBuffer.allocateDirect(byte_count)
     _fill_bytebuffer_with_floats(bb, values)
     bb.rewind()
@@ -273,17 +236,11 @@ def _push_sense_world_uniforms(chain, camera):
     strength = env
 
     pos = camera.pos
-    # Matrix4f(Matrix4fc) copy ctor fails through GraalPy foreign-object
-    # dispatch ("invalid instantiation"). `.set(m)` on a default-constructed
-    # matrix takes the same interface arg and works.
     view = Matrix4f().set(camera.viewRotationMatrix).translate(
         jf(-pos.x), jf(-pos.y), jf(-pos.z)
     )
     inv_view_proj = Matrix4f().set(camera.projectionMatrix).mul(view).invert()
 
-    # Column-major, matching how the shader reads mat4. Avoid get(FloatBuffer):
-    # GraalPy dispatches that through JOML's unsafe direct-memory path and
-    # segfaults on a bad address.
     m = [
         inv_view_proj.m00(), inv_view_proj.m01(), inv_view_proj.m02(), inv_view_proj.m03(),
         inv_view_proj.m10(), inv_view_proj.m11(), inv_view_proj.m12(), inv_view_proj.m13(),
@@ -310,6 +267,8 @@ def _push_sense_world_uniforms(chain, camera):
 
 
 def run_world_sense_effect(allocator, camera):
+    """Run the world-space sense post-effect chain. Called from the
+    LevelRenderer.renderLevel TAIL mixin."""
     if not effect_active():
         return
     if (
@@ -328,8 +287,6 @@ def run_world_sense_effect(allocator, camera):
     _push_sense_world_uniforms(chain, camera)
     chain.process(client.getMainRenderTarget(), allocator)
 
-
-# ---------------- Tick entry ----------------
 
 def on_client_tick(client):
     _threat_tick(client)

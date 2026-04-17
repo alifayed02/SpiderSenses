@@ -1,7 +1,5 @@
-"""
-Runs the world-space sense post-effect chain at LevelRenderer.renderLevel TAIL —
-the only stage where minecraft:main's depth buffer is still valid.
-"""
+"""Runs the world-space sense post-effect at LevelRenderer.renderLevel TAIL,
+where minecraft:main's depth buffer is still valid."""
 
 from elide.minecraft import mixin
 
@@ -24,4 +22,4 @@ def run_sense_effect(
     chunks,
     ci,
 ):
-    run_world_sense_effect(allocator, camera)  # defined in state.py
+    run_world_sense_effect(allocator, camera)

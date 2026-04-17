@@ -1,9 +1,4 @@
-"""
-Zoom-in FOV warp while the spidey-sense effect is active.
-
-@ModifyReturnValue on Camera.calculateFov. Bridge signature (F)F doesn't
-forward partial_tick, so we use fov_envelope(0) — tick-rate granularity.
-"""
+"""FOV warp applied while the effect is active."""
 
 from elide.minecraft import mixin
 
@@ -16,7 +11,7 @@ MAX_FOV_GAIN = 0.12
     at="RETURN",
 )
 def warp_fov(this, original):
-    env = fov_envelope(0.0)  # defined in state.py (shared __main__)
+    env = fov_envelope(0.0)
     if env <= 0.001:
         return original
-    return jf(original * (1.0 + MAX_FOV_GAIN * env))  # pre-narrow to pass Java float check
+    return jf(original * (1.0 + MAX_FOV_GAIN * env))

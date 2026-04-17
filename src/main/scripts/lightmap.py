@@ -1,7 +1,5 @@
-"""
-Lifts the lightmap's night-vision intensity while the effect is active,
-so dark scenes render bright before our tint pass.
-"""
+"""Lifts the lightmap's night-vision intensity while the effect is active
+so dark scenes brighten before the tint pass."""
 
 import java
 
@@ -17,10 +15,10 @@ _NIGHT_VISION_WHITE = _Vector3f(1.0, 1.0, 1.0)
     at="TAIL",
 )
 def lift_night_vision(this, state, partial_tick, ci):
-    env = envelope(partial_tick)  # defined in state.py (shared __main__)
+    env = envelope(partial_tick)
     if env <= 0.001:
         return
     if env > state.nightVisionEffectIntensity:
-        state.nightVisionEffectIntensity = jf(env)  # pre-narrow to pass Java float check
+        state.nightVisionEffectIntensity = jf(env)
         state.nightVisionColor = _NIGHT_VISION_WHITE
     state.needsUpdate = True

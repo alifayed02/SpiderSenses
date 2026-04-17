@@ -1,14 +1,8 @@
-"""
-Mixin accessors/invokers ported from the Java mixin/ package.
+"""Mixin accessors and invokers.
 
-Elide's build-time resolver introspects each target class to build
-the correct descriptor (getter vs setter for @Accessor, full method
-signature for @Invoker), so the function bodies here never run —
-Sponge Mixin grafts the real field access / method call onto the
-target class bytecode. Bodies are kept as `pass` placeholders.
-
-Python identifiers can't contain '$', so the grafted method names
-use underscores instead of the Sponge convention's '$'.
+Bodies are placeholders. Elide's build-time resolver introspects each
+target to build the descriptor, and Sponge Mixin grafts the field
+access or method invocation onto the target class bytecode.
 """
 
 from elide.minecraft import mixin

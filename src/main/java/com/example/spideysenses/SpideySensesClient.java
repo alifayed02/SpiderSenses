@@ -11,13 +11,7 @@ import org.slf4j.LoggerFactory;
 import java.nio.ByteBuffer;
 
 /**
- * Fabric needs a JVM class it can resolve via {@code Class.forName()}, so this is
- * the thinnest possible shell. All state, threat tracking, envelopes, mixins, and
- * per-tick logic live under {@code src/main/scripts/}.
- *
- * <p>{@link #upgradeBuffer} stays in Java because GraalPy in Elide's embedded
- * configuration can neither coerce a Python lambda to {@code Supplier<String>}
- * nor subclass the interface from Python (host-access proxy disabled).</p>
+ * Fabric entrypoint. All mod logic lives under {@code src/main/scripts/}.
  */
 public class SpideySensesClient implements ClientModInitializer {
     public static final String MOD_ID = "spidey-senses";
@@ -34,6 +28,13 @@ public class SpideySensesClient implements ClientModInitializer {
         );
     }
 
+    /**
+     * Allocates a new GpuBuffer with COPY_DST added to the usage flags and
+     * seeds it with {@code initial}. Bridged from Python because Elide ships
+     * GraalPy 25.0.2, whose legacy inheritance semantics don't support
+     * implementing functional interfaces like {@link java.util.function.Supplier}.
+     * Revisit when Elide bundles GraalPy 25.2+ (which defaults to {@code new_style=True}).
+     */
     public static GpuBuffer upgradeBuffer(GpuBuffer old, String name, ByteBuffer initial) {
         int usage = old.usage() | GpuBuffer.USAGE_COPY_DST;
         GpuBuffer replacement = RenderSystem.getDevice().createBuffer(() -> name, usage, initial);
