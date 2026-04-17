@@ -110,14 +110,18 @@ def _threat_tick(client):
 
 
 def _advance_trigger():
-    global _trigger_ticks, _armed
+    global _trigger_ticks, _armed, _cooldown_ticks
 
     if _threat < REARM_THRESHOLD:
         _armed = True
 
-    if _armed and _threat >= TRIGGER_THRESHOLD and _trigger_ticks < 0:
+    if _cooldown_ticks > 0:
+        _cooldown_ticks -= 1
+
+    if _armed and _threat >= TRIGGER_THRESHOLD and _trigger_ticks < 0 and _cooldown_ticks == 0:
         _trigger_ticks = 0
         _armed = False
+        _cooldown_ticks = COOLDOWN_TICKS
 
     if _trigger_ticks >= 0:
         _trigger_ticks += 1
