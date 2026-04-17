@@ -8,8 +8,6 @@ lightmap.py, and level_renderer.py can reference `envelope`,
 
 import java
 
-from elide.minecraft import mixin  # noqa: F401
-
 _JavaFloat = java.type("java.lang.Float")
 
 
@@ -37,7 +35,7 @@ Enemy              = java.type("net.minecraft.world.entity.monster.Enemy")
 SpideySensesClient = java.type("com.example.spideysenses.SpideySensesClient")
 _FloatArrayType    = java.type("float[]")
 
-MOD_ID                = "spidey-senses"
+MOD_ID                = SpideySensesClient.MOD_ID
 DETECTION_RADIUS      = 16.0
 DETECTION_RADIUS_SQR  = DETECTION_RADIUS * DETECTION_RADIUS
 TRIGGER_THRESHOLD     = 0.40
@@ -48,7 +46,7 @@ COOLDOWN_TICKS        = 600
 MAX_CHROMATIC_DISTORT = 3.2
 SENSE_EDGE_SOFTNESS   = 3.0
 MAX_SHARPEN_AMOUNT    = 0.30
-MAX_ZOOM_BLUR         = 0.0
+MAX_FOV_GAIN          = 0.12
 COS_HALF_FOV          = 0.5
 
 CHROMATIC_EFFECT   = Identifier.fromNamespaceAndPath(MOD_ID, "chromatic")
@@ -83,9 +81,10 @@ def _threat_tick(client):
 
     eye_pos = player.getEyePosition()
     view_vec = player.getViewVector(1.0)
+    search_box = player.getBoundingBox().inflate(DETECTION_RADIUS)
 
     closest_sqr = float("inf")
-    for entity in level.entitiesForRendering():
+    for entity in level.getEntities(player, search_box):
         if not isinstance(entity, Enemy):
             continue
         if not entity.isAlive():
@@ -183,12 +182,9 @@ def _update_post_effect(client):
         _effect_applied = False
 
 
-def _fill_bytebuffer_with_floats(byte_buffer, values):
-    n = len(values)
-    farr = _FloatArrayType(n)
-    for i, v in enumerate(values):
-        farr[i] = jf(v)
-    byte_buffer.order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer().put(farr)
+# Per-uniform-key reusable scratch: (java float[], direct ByteBuffer, FloatBuffer view).
+# Steady-state writes hit this cache instead of allocating fresh native + view objects per tick.
+_write_cache = {}
 
 
 def _write_floats(uniforms_map, key, values):
@@ -197,20 +193,35 @@ def _write_floats(uniforms_map, key, values):
     buf = uniforms_map.get(key)
     if buf is None:
         return
-    byte_count = len(values) * 4
+    n = len(values)
+
+    cached = _write_cache.get(key)
+    if cached is None or len(cached[0]) != n:
+        farr = _FloatArrayType(n)
+        bb = ByteBuffer.allocateDirect(n * 4).order(ByteOrder.LITTLE_ENDIAN)
+        cached = (farr, bb, bb.asFloatBuffer())
+        _write_cache[key] = cached
+    farr, bb, fb = cached
+
+    for i, v in enumerate(values):
+        farr[i] = jf(v)
+
     if (buf.usage() & GpuBuffer.USAGE_COPY_DST) == 0:
+        # One-time upgrade: vanilla UBOs lack COPY_DST, so allocate a fresh
+        # GpuBuffer with the flag, seeded with our values padded to UBO size.
         size = int(buf.size())
-        initial = ByteBuffer.allocateDirect(size)
-        _fill_bytebuffer_with_floats(initial, values)
+        initial = ByteBuffer.allocateDirect(size).order(ByteOrder.LITTLE_ENDIAN)
+        initial.asFloatBuffer().put(farr)
         initial.rewind()
         replacement = SpideySensesClient.upgradeBuffer(buf, MOD_ID + "-" + key, initial)
         uniforms_map.put(key, replacement)
         return
-    bb = ByteBuffer.allocateDirect(byte_count)
-    _fill_bytebuffer_with_floats(bb, values)
+
+    fb.rewind()
+    fb.put(farr)
     bb.rewind()
     RenderSystem.getDevice().createCommandEncoder().writeToBuffer(
-        buf.slice(0, byte_count), bb
+        buf.slice(0, n * 4), bb
     )
 
 
@@ -249,7 +260,6 @@ def _push_sense_world_uniforms(chain, camera):
     ]
 
     sharpen = MAX_SHARPEN_AMOUNT * env
-    zoom_blur = MAX_ZOOM_BLUR * fov_envelope(0.0)
 
     sense_uniforms = [
         radius, SENSE_EDGE_SOFTNESS, strength, 0.0,
@@ -262,8 +272,6 @@ def _push_sense_world_uniforms(chain, camera):
             _write_floats(u, "SenseConfig", sense_uniforms)
         if u.containsKey("SharpenConfig"):
             _write_floats(u, "SharpenConfig", [sharpen])
-        if u.containsKey("ZoomBlurConfig"):
-            _write_floats(u, "ZoomBlurConfig", [zoom_blur, 0.0, 0.0, 0.0])
 
 
 def run_world_sense_effect(allocator, camera):

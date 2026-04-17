@@ -2,8 +2,6 @@
 
 from elide.minecraft import mixin
 
-MAX_FOV_GAIN = 0.12
-
 
 @mixin.modify_return_value(
     "net.minecraft.client.Camera",
