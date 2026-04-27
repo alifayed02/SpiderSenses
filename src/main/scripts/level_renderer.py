@@ -22,4 +22,5 @@ def run_sense_effect(
     chunks,
     ci,
 ):
+    render_web_line(this, camera, delta)
     run_world_sense_effect(allocator, camera)
