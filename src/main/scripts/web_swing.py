@@ -14,10 +14,11 @@ HitType     = java.type("net.minecraft.world.phys.HitResult$Type")
 RenderTypes  = java.type("net.minecraft.client.renderer.rendertype.RenderTypes")
 Tesselator   = java.type("com.mojang.blaze3d.vertex.Tesselator")
 RenderSystem = java.type("com.mojang.blaze3d.systems.RenderSystem")
+MoverType    = java.type("net.minecraft.world.entity.MoverType")
+Vec3         = java.type("net.minecraft.world.phys.Vec3")
 
-WEB_ROPE_MIN     = 3.0
-SWING_FORCE      = 0.065
-SWING_PUMP_BONUS = 2.0
+WEB_ROPE_MIN         = 1.0
+CONSTRAINT_STIFFNESS = 0.2
 
 SEARCH_RANGE      = 48.0
 SKYHOOK_FORWARD   = 20.0
@@ -33,11 +34,17 @@ WEB_SEGMENTS  = 24
 WEB_HALF_WIDTH = 0.025
 FULL_BRIGHT    = 15728880
 
-_attached     = False
-_anchor       = None
-_last_anchor  = None
-_rope_length  = 0.0
-_prev_use     = False
+_attached      = False
+_anchor        = None
+_last_anchor   = None
+_rope_length   = 0.0
+_prev_use      = False
+_tension       = 0.0
+_prev_tension  = 0.0
+_rope_ticks    = 0
+_in_ground     = False
+_was_airborne  = False
+_detached      = None
 
 
 def prime():
@@ -94,7 +101,7 @@ def _score_candidate(player_pos, player_vel, hit_pos):
 
 
 def _try_shoot(client):
-    global _attached, _anchor, _rope_length
+    global _attached, _anchor, _rope_length, _tension, _prev_tension, _rope_ticks, _in_ground, _was_airborne
     player = client.player
     level  = client.level
     if player is None or level is None:
@@ -137,95 +144,169 @@ def _try_shoot(client):
 
     if best_score >= SCORE_THRESHOLD and best_point is not None:
         _anchor = best_point
+        _in_ground = True
         Logger.info("[web] ATTACHED to block at ({},{},{}) score={} rope={}",
                      str(round(float(_anchor.x), 1)), str(round(float(_anchor.y), 1)), str(round(float(_anchor.z), 1)),
                      str(round(best_score, 3)), str(round(float(pos.distanceTo(_anchor)), 1)))
     else:
         _anchor = pos.add(sx * SKYHOOK_FORWARD, SKYHOOK_HEIGHT, sz * SKYHOOK_FORWARD)
+        _in_ground = False
         Logger.info("[web] SKYHOOK at ({},{},{}) bestScore={}",
                      str(round(float(_anchor.x), 1)), str(round(float(_anchor.y), 1)), str(round(float(_anchor.z), 1)),
                      str(round(best_score, 3)))
 
     _rope_length = max(WEB_ROPE_MIN, pos.distanceTo(_anchor))
     _attached = True
+    _tension = 0.0
+    _prev_tension = 0.0
+    _rope_ticks = 0
+    _was_airborne = False
 
 
-def _detach():
-    global _attached, _anchor, _last_anchor, _rope_length
+def _detach(player):
+    global _attached, _anchor, _last_anchor, _rope_length, _detached
+    global _tension, _prev_tension, _rope_ticks
     Logger.info("[web] DETACHED")
     _last_anchor = _anchor
+    vel = player.getDeltaMovement()
+    px, py, pz = float(player.getX()), float(player.getY()), float(player.getZ())
+    _detached = [
+        float(_anchor.x), float(_anchor.y), float(_anchor.z),
+        px, py, pz,
+        float(vel.x), float(vel.y), float(vel.z),
+        px, py, pz,
+        _rope_length, _tension, _tension, 0, _in_ground,
+    ]
     _attached    = False
     _anchor      = None
     _rope_length = 0.0
+    _tension     = 0.0
+    _prev_tension = 0.0
+    _rope_ticks  = 0
 
 
-def _apply_swing_input(player, rx, ry, rz):
-    move = player.input.getMoveVector()
-    fwd    = float(move.y)
-    strafe = float(move.x)
-    if abs(fwd) < 0.01 and abs(strafe) < 0.01:
-        return
-
-    look = player.getViewVector(1.0)
-    hlen = (look.x ** 2 + look.z ** 2) ** 0.5
-    if hlen < 1.0e-4:
-        return
-    fx = look.x / hlen
-    fz = look.z / hlen
-
-    ix = fx * fwd + (-fz) * strafe
-    iz = fz * fwd + fx * strafe
-
-    dot_r = ix * rx + iz * rz
-    tx = ix - dot_r * rx
-    ty =    - dot_r * ry
-    tz = iz - dot_r * rz
-    tlen = (tx * tx + ty * ty + tz * tz) ** 0.5
-    if tlen < 1.0e-4:
-        return
-    tx /= tlen
-    ty /= tlen
-    tz /= tlen
-
-    force = SWING_FORCE
+def _ground_boost_detach(player):
     vel = player.getDeltaMovement()
-    if fwd > 0.0 and vel.y < 0.0 and player.getY() < _anchor.y:
-        force *= SWING_PUMP_BONUS
+    mx = float(vel.x)
+    my = float(vel.y)
+    mz = float(vel.z)
+    pull = max(-1.0, min(1.0, (float(_anchor.y) - float(player.getY())) * 0.1))
+    player.setDeltaMovement(Vec3(mx * 0.9 + mx, my * 0.9 + (my + pull), mz * 0.9 + mz))
+    _detach(player)
 
-    player.setDeltaMovement(vel.add(tx * force, ty * force, tz * force))
+
+def _tick_detached(client):
+    global _detached
+    if _detached is None:
+        return
+    r = _detached
+    r[15] += 1
+    if r[15] > 60:
+        _detached = None
+        return
+
+    r[9]  = r[3]
+    r[10] = r[4]
+    r[11] = r[5]
+
+    level  = client.level
+    player = client.player
+    if level is not None and player is not None:
+        ep  = Vec3(r[3], r[4], r[5])
+        nep = Vec3(r[3] + r[6], r[4] + r[7], r[5] + r[8])
+        hit = level.clip(ClipContext(ep, nep, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+        if hit.getType() == HitType.BLOCK:
+            r[6] *= -0.3
+            r[7] *= -0.3
+            r[8] *= -0.3
+
+    r[6] *= 0.7
+    r[7] *= 0.7
+    r[8] *= 0.7
+    r[7] -= 0.02
+
+    r[3] += r[6]
+    r[4] += r[7]
+    r[5] += r[8]
+
+    r[14] = r[13]
+    dx = r[0] - r[3]
+    dy = r[1] - r[4]
+    dz = r[2] - r[5]
+    length = (dx * dx + dy * dy + dz * dz) ** 0.5
+    if r[16]:
+        target = min((length + 1.0) / r[12], 1.0)
+    else:
+        target = 1.0
+    r[13] = r[13] - (r[13] - target) / 4.0
+
+
+def _restrict_motion(ax, ay, az, ex, ey, ez):
+    dx = ax - ex
+    dy = ay - ey
+    dz = az - ez
+    dist_sq = dx * dx + dy * dy + dz * dz
+    rope = max(_rope_length, WEB_ROPE_MIN)
+    if dist_sq > rope * rope:
+        dist = dist_sq ** 0.5
+        overshoot = (dist - rope) * CONSTRAINT_STIFFNESS
+        return (dx / dist * overshoot, dy / dist * overshoot, dz / dist * overshoot)
+    return None
 
 
 def _apply_pendulum(player):
-    global _rope_length
-    px = player.getX() - _anchor.x
-    py = player.getY() - _anchor.y
-    pz = player.getZ() - _anchor.z
-    dist = (px * px + py * py + pz * pz) ** 0.5
-    if dist < 1.0e-4:
+    ax = float(_anchor.x)
+    ay = float(_anchor.y)
+    az = float(_anchor.z)
+    px = float(player.getX())
+    py = float(player.getY()) + float(player.getBbHeight())
+    pz = float(player.getZ())
+
+    v = _restrict_motion(ax, ay, az, px, py, pz)
+    if v is None:
         return
 
-    rx, ry, rz = px / dist, py / dist, pz / dist
-
-    _apply_swing_input(player, rx, ry, rz)
+    vx, vy, vz = v
 
     vel = player.getDeltaMovement()
-    if dist >= _rope_length:
-        v_rad = vel.x * rx + vel.y * ry + vel.z * rz
-        if v_rad > 0.0:
-            vel = vel.subtract(v_rad * rx, v_rad * ry, v_rad * rz)
-            player.setDeltaMovement(vel)
+    speed = (float(vel.x) ** 2 + float(vel.y) ** 2 + float(vel.z) ** 2) ** 0.5
+    move = player.input.getMoveVector()
+    fwd = float(move.y)
+    strafe = float(move.x)
+    mag = (fwd * fwd + strafe * strafe) ** 0.5
+    if mag >= 1.0e-4:
+        if mag > 1.0:
+            fwd /= mag
+            strafe /= mag
+        look = player.getViewVector(1.0)
+        hlen = (look.x ** 2 + look.z ** 2) ** 0.5
+        if hlen > 1.0e-4:
+            fx = look.x / hlen
+            fz = look.z / hlen
+            ix = fx * fwd + fz * strafe
+            iz = fz * fwd + (-fx) * strafe
+            input_force = min(2.0, speed) / 12.0
+            player.setDeltaMovement(vel.add(ix * input_force, 0.0, iz * input_force))
 
-        player.setPos(
-            _anchor.x + rx * _rope_length,
-            _anchor.y + ry * _rope_length,
-            _anchor.z + rz * _rope_length,
-        )
+    player.move(MoverType.SELF, Vec3(vx, vy, vz))
 
-    player.fallDistance = float32(0.0)
+    vel = player.getDeltaMovement()
+    player.setDeltaMovement(vel.add(vx, vy, vz))
+
+    vel = player.getDeltaMovement()
+    v1 = _restrict_motion(ax, ay, az,
+                          px + float(vel.x), py + float(vel.y), pz + float(vel.z))
+    if v1 is not None:
+        player.setDeltaMovement(player.getDeltaMovement().add(
+            v1[0] - vx, v1[1] - vy, v1[2] - vz))
+
+    vel = player.getDeltaMovement()
+    if float(vel.y) >= 0 or vy >= 0 or (v1 is not None and vy - v1[1] >= 0):
+        player.fallDistance = float32(0.0)
 
 
 def render_web_line(level_renderer, camera, delta):
-    if not _attached or _anchor is None:
+    if not _attached and _detached is None:
         return
     player = Minecraft.getInstance().player
     if player is None:
@@ -233,22 +314,34 @@ def render_web_line(level_renderer, camera, delta):
 
     sub = float(delta.getGameTimeDeltaPartialTick(True))
     cam = camera.pos
-    pos = player.getPosition(sub)
+    alpha = 255
 
-    yaw = math.radians(float(player.getYRot(sub)))
-    rx = -math.sin(yaw)
-    rz =  math.cos(yaw)
-
-    hand_x = pos.x + rx * 0.35
-    hand_y = float(pos.y) + float(player.getEyeHeight()) * 0.7
-    hand_z = pos.z + rz * 0.35
-
-    sx = float(hand_x - cam.x)
-    sy = float(hand_y - cam.y)
-    sz = float(hand_z - cam.z)
-    ex = float(_anchor.x - cam.x)
-    ey = float(_anchor.y - cam.y)
-    ez = float(_anchor.z - cam.z)
+    if _attached and _anchor is not None:
+        pos = player.getPosition(sub)
+        yaw = math.radians(float(player.getYRot(sub)))
+        rx = -math.sin(yaw)
+        rz =  math.cos(yaw)
+        sx = float(pos.x + rx * 0.35 - cam.x)
+        sy = float(float(pos.y) + float(player.getEyeHeight()) * 0.7 - cam.y)
+        sz = float(pos.z + rz * 0.35 - cam.z)
+        ex = float(_anchor.x - cam.x)
+        ey = float(_anchor.y - cam.y)
+        ez = float(_anchor.z - cam.z)
+        t_interp = _prev_tension + (_tension - _prev_tension) * sub
+    elif _detached is not None:
+        r = _detached
+        sx = float(r[0] - cam.x)
+        sy = float(r[1] - cam.y)
+        sz = float(r[2] - cam.z)
+        ex = float((r[9] + (r[3] - r[9]) * sub) - cam.x)
+        ey = float((r[10] + (r[4] - r[10]) * sub) - cam.y)
+        ez = float((r[11] + (r[5] - r[11]) * sub) - cam.z)
+        t_interp = r[14] + (r[13] - r[14]) * sub
+        alpha = max(0, int(255 * (1.0 - (r[15] + sub) / 60.0)))
+        if alpha <= 0:
+            return
+    else:
+        return
 
     rdx = ex - sx
     rdy = ey - sy
@@ -257,7 +350,21 @@ def render_web_line(level_renderer, camera, delta):
     if rope_len < 0.1:
         return
 
-    sag = min(1.5, rope_len * 0.03)
+    rt = 1.0 - t_interp
+    if rt < 0.001:
+        segments = 1
+    else:
+        segments = WEB_SEGMENTS
+
+    if sy > ey:
+        mid_x = sx
+        mid_y = sy + (ey - sy) * rt * 2.0
+        mid_z = sz
+    else:
+        mid_x = ex
+        mid_y = ey + (sy - ey) * rt * 2.0
+        mid_z = ez
+
     hw = WEB_HALF_WIDTH
 
     mv = RenderSystem.getModelViewStack()
@@ -267,11 +374,12 @@ def render_web_line(level_renderer, camera, delta):
     leash = RenderTypes.leash()
     builder = Tesselator.getInstance().begin(leash.mode(), leash.format())
 
-    for i in range(WEB_SEGMENTS + 1):
-        t = i / WEB_SEGMENTS
-        px = sx + rdx * t
-        py = sy + rdy * t - sag * math.sin(t * math.pi)
-        pz = sz + rdz * t
+    for i in range(segments + 1):
+        t = i / segments
+        u = 1.0 - t
+        px = u * u * sx + 2.0 * u * t * mid_x + t * t * ex
+        py = u * u * sy + 2.0 * u * t * mid_y + t * t * ey
+        pz = u * u * sz + 2.0 * u * t * mid_z + t * t * ez
 
         bx = rdy * pz - rdz * py
         by = rdz * px - rdx * pz
@@ -284,8 +392,8 @@ def render_web_line(level_renderer, camera, delta):
             by = by / bl * hw
             bz = bz / bl * hw
 
-        builder.addVertex(float32(px - bx), float32(py - by), float32(pz - bz)).setColor(255, 255, 255, 255).setLight(FULL_BRIGHT)
-        builder.addVertex(float32(px + bx), float32(py + by), float32(pz + bz)).setColor(255, 255, 255, 255).setLight(FULL_BRIGHT)
+        builder.addVertex(float32(px - bx), float32(py - by), float32(pz - bz)).setColor(255, 255, 255, alpha).setLight(FULL_BRIGHT)
+        builder.addVertex(float32(px + bx), float32(py + by), float32(pz + bz)).setColor(255, 255, 255, alpha).setLight(FULL_BRIGHT)
 
     mesh = builder.buildOrThrow()
     leash.draw(mesh)
@@ -294,11 +402,13 @@ def render_web_line(level_renderer, camera, delta):
 
 
 def web_tick(client):
-    global _prev_use, _rope_length
+    global _prev_use, _rope_length, _rope_ticks, _tension, _prev_tension, _was_airborne
     player = client.player
     if player is None or client.isPaused():
         _prev_use = False
         return
+
+    _tick_detached(client)
 
     use = client.options.keyUse.isDown()
     just_pressed  = use and not _prev_use
@@ -306,14 +416,34 @@ def web_tick(client):
     _prev_use = use
 
     if _attached:
+        _rope_ticks += 1
+
+        if not player.onGround():
+            _was_airborne = True
+
         if just_released:
-            _detach()
+            _detach(player)
             return
-        if player.onGround():
-            dist = player.position().distanceTo(_anchor)
-            if dist > _rope_length:
-                _rope_length = dist
+
+        if _was_airborne and player.onGround() and _rope_ticks > 10:
+            _ground_boost_detach(player)
+            return
+
+        _apply_pendulum(player)
+
+        _prev_tension = _tension
+        px = float(player.getX())
+        py = float(player.getY()) + float(player.getBbHeight())
+        pz = float(player.getZ())
+        ax = float(_anchor.x)
+        ay = float(_anchor.y)
+        az = float(_anchor.z)
+        length = ((ax - px) ** 2 + (ay - py) ** 2 + (az - pz) ** 2) ** 0.5
+        if _in_ground:
+            target = min((length + 1.0) / _rope_length, 1.0)
         else:
-            _apply_pendulum(player)
+            target = 1.0
+        _tension = _tension - (_tension - target) / 4.0
+
     elif just_pressed:
         _try_shoot(client)
