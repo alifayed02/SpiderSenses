@@ -41,5 +41,4 @@ See [elide.dev](https://elide.dev) for the actual story.
 
 ## Availability
 
-> [!NOTE]
-> Coming to [Modrinth](https://modrinth.com) soon.
+Available on [Modrinth](https://modrinth.com/mod/spideysense).
