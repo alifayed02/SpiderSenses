@@ -317,13 +317,39 @@ def render_web_line(level_renderer, camera, delta):
     alpha = 255
 
     if _attached and _anchor is not None:
+        mc = Minecraft.getInstance()
         pos = player.getPosition(sub)
-        yaw = math.radians(float(player.getYRot(sub)))
-        rx = -math.sin(yaw)
-        rz =  math.cos(yaw)
-        sx = float(pos.x + rx * 0.35 - cam.x)
-        sy = float(float(pos.y) + float(player.getEyeHeight()) * 0.7 - cam.y)
-        sz = float(pos.z + rz * 0.35 - cam.z)
+
+        if mc.options.getCameraType().isFirstPerson():
+            pitch = math.radians(float(player.getXRot(sub)))
+            yaw = math.radians(float(player.getYRot(sub)))
+            ox, oy, oz = -0.3, -0.15, 0.4
+            cos_p = math.cos(pitch)
+            sin_p = math.sin(pitch)
+            ry = oy * cos_p - oz * sin_p
+            rz_r = oy * sin_p + oz * cos_p
+            cos_y = math.cos(yaw)
+            sin_y = math.sin(yaw)
+            hx = ox * cos_y - rz_r * sin_y
+            hz = ox * sin_y + rz_r * cos_y
+            hy = ry
+            sx = float(float(pos.x) + hx - cam.x)
+            sy = float(float(pos.y) + float(player.getEyeHeight()) + hy - cam.y)
+            sz = float(float(pos.z) + hz - cam.z)
+        else:
+            by = math.radians(float(player.yBodyRotO) + (float(player.yBodyRot) - float(player.yBodyRotO)) * sub)
+            cos_by = math.cos(by)
+            sin_by = math.sin(by)
+            renderer = mc.getEntityRenderDispatcher().getRenderer(player)
+            model = renderer.getModel()
+            arm_pitch = float(model.rightArm.xRot)
+            arm_len = 10.0 / 16.0
+            tip_down = -arm_len * math.cos(arm_pitch)
+            tip_fwd = arm_len * math.sin(arm_pitch)
+            sx = float(float(pos.x) - cos_by * 5.0 / 16.0 - sin_by * tip_fwd - cam.x)
+            sy = float(float(pos.y) + 22.0 / 16.0 + tip_down - cam.y)
+            sz = float(float(pos.z) - sin_by * 5.0 / 16.0 + cos_by * tip_fwd - cam.z)
+
         ex = float(_anchor.x - cam.x)
         ey = float(_anchor.y - cam.y)
         ez = float(_anchor.z - cam.z)
