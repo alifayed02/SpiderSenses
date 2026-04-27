@@ -1,6 +1,6 @@
 """FOV warp applied while the effect is active."""
 
-from elide.minecraft import mixin
+from elide import mixin
 
 
 @mixin.modify_return_value(
@@ -12,4 +12,4 @@ def warp_fov(this, original):
     env = fov_envelope(0.0)
     if env <= 0.001:
         return original
-    return jf(original * (1.0 + MAX_FOV_GAIN * env))
+    return float32(original * (1.0 + MAX_FOV_GAIN * env))

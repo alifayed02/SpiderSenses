@@ -5,7 +5,7 @@ target to build the descriptor, and Sponge Mixin grafts the field
 access or method invocation onto the target class bytecode.
 """
 
-from elide.minecraft import mixin
+from elide import mixin
 
 
 @mixin.invoker("net.minecraft.client.renderer.GameRenderer", method="setPostEffect")
@@ -20,4 +20,9 @@ def spideysenses_passes(this):
 
 @mixin.accessor("net.minecraft.client.renderer.PostPass", method="customUniforms")
 def spideysenses_customUniforms(this):
+    pass
+
+
+@mixin.accessor("net.minecraft.client.renderer.LevelRenderer", method="renderBuffers")
+def spideysenses_renderBuffers(this):
     pass

@@ -3,7 +3,7 @@ so dark scenes brighten before the tint pass."""
 
 import java
 
-from elide.minecraft import mixin
+from elide import mixin
 
 _Vector3f = java.type("org.joml.Vector3f")
 _NIGHT_VISION_WHITE = _Vector3f(1.0, 1.0, 1.0)
@@ -19,6 +19,6 @@ def lift_night_vision(this, state, partial_tick, ci):
     if env <= 0.001:
         return
     if env > state.nightVisionEffectIntensity:
-        state.nightVisionEffectIntensity = jf(env)
+        state.nightVisionEffectIntensity = float32(env)
         state.nightVisionColor = _NIGHT_VISION_WHITE
     state.needsUpdate = True

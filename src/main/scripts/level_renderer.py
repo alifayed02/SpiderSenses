@@ -1,7 +1,7 @@
 """Runs the world-space sense post-effect at LevelRenderer.renderLevel TAIL,
 where minecraft:main's depth buffer is still valid."""
 
-from elide.minecraft import mixin
+from elide import mixin
 
 
 @mixin.inject(

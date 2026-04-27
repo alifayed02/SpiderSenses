@@ -17,12 +17,14 @@ public class SpideySensesClient implements ClientModInitializer {
     public static final String MOD_ID = "spidey-senses";
     public static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
 
-    private static final String STATE_SCRIPT = "src/main/scripts/state.py";
+    private static final String STATE_SCRIPT     = "src/main/scripts/state.py";
+    private static final String WEB_SWING_SCRIPT = "src/main/scripts/web_swing.py";
 
     @Override
     public void onInitializeClient() {
         LOGGER.info("{} initialized", MOD_ID);
         PolyglotDispatch.call("python", STATE_SCRIPT, "prime");
+        PolyglotDispatch.call("python", WEB_SWING_SCRIPT, "prime");
         ClientTickEvents.END_CLIENT_TICK.register(
             client -> PolyglotDispatch.call("python", STATE_SCRIPT, "on_client_tick", client)
         );

@@ -8,19 +8,7 @@ lightmap.py, and level_renderer.py can reference `envelope`,
 
 import java
 
-_JavaFloat = java.type("java.lang.Float")
-
-
-def jf(v):
-    """Narrow a Python double to a 32-bit-representable double.
-
-    GraalPy rejects assignment of a Python 64-bit float into a Java
-    32-bit float slot unless the value round-trips losslessly through
-    float32. Routing through `Float.parseFloat(str)` performs the
-    narrowing inside the JVM and returns a value that passes the
-    check at every later Java-float boundary.
-    """
-    return _JavaFloat.parseFloat(str(v))
+from elide import float32
 
 
 Minecraft          = java.type("net.minecraft.client.Minecraft")
@@ -33,7 +21,6 @@ ByteBuffer         = java.type("java.nio.ByteBuffer")
 ByteOrder          = java.type("java.nio.ByteOrder")
 Enemy              = java.type("net.minecraft.world.entity.monster.Enemy")
 SpideySensesClient = java.type("com.example.spideysenses.SpideySensesClient")
-_FloatArrayType    = java.type("float[]")
 
 MOD_ID                = SpideySensesClient.MOD_ID
 DETECTION_RADIUS      = 16.0
@@ -186,8 +173,6 @@ def _update_post_effect(client):
         _effect_applied = False
 
 
-# Per-uniform-key reusable scratch: (java float[], direct ByteBuffer, FloatBuffer view).
-# Steady-state writes hit this cache instead of allocating fresh native + view objects per tick.
 _write_cache = {}
 
 
@@ -200,29 +185,26 @@ def _write_floats(uniforms_map, key, values):
     n = len(values)
 
     cached = _write_cache.get(key)
-    if cached is None or len(cached[0]) != n:
-        farr = _FloatArrayType(n)
+    if cached is None or cached[0].capacity() != n * 4:
         bb = ByteBuffer.allocateDirect(n * 4).order(ByteOrder.LITTLE_ENDIAN)
-        cached = (farr, bb, bb.asFloatBuffer())
+        cached = (bb, bb.asFloatBuffer())
         _write_cache[key] = cached
-    farr, bb, fb = cached
+    bb, fb = cached
 
-    for i, v in enumerate(values):
-        farr[i] = jf(v)
+    fb.rewind()
+    for v in values:
+        fb.put(float32(v))
 
     if (buf.usage() & GpuBuffer.USAGE_COPY_DST) == 0:
-        # One-time upgrade: vanilla UBOs lack COPY_DST, so allocate a fresh
-        # GpuBuffer with the flag, seeded with our values padded to UBO size.
         size = int(buf.size())
         initial = ByteBuffer.allocateDirect(size).order(ByteOrder.LITTLE_ENDIAN)
-        initial.asFloatBuffer().put(farr)
+        fb.rewind()
+        initial.asFloatBuffer().put(fb)
         initial.rewind()
         replacement = SpideySensesClient.upgradeBuffer(buf, MOD_ID + "-" + key, initial)
         uniforms_map.put(key, replacement)
         return
 
-    fb.rewind()
-    fb.put(farr)
     bb.rewind()
     RenderSystem.getDevice().createCommandEncoder().writeToBuffer(
         buf.slice(0, n * 4), bb
@@ -252,7 +234,7 @@ def _push_sense_world_uniforms(chain, camera):
 
     pos = camera.pos
     view = Matrix4f().set(camera.viewRotationMatrix).translate(
-        jf(-pos.x), jf(-pos.y), jf(-pos.z)
+        float32(-pos.x), float32(-pos.y), float32(-pos.z)
     )
     inv_view_proj = Matrix4f().set(camera.projectionMatrix).mul(view).invert()
 
@@ -305,3 +287,4 @@ def on_client_tick(client):
     _advance_trigger()
     _update_post_effect(client)
     _push_chromatic_uniforms(client)
+    web_tick(client)
