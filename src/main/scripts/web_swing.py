@@ -15,7 +15,9 @@ RenderTypes  = java.type("net.minecraft.client.renderer.rendertype.RenderTypes")
 Tesselator   = java.type("com.mojang.blaze3d.vertex.Tesselator")
 RenderSystem = java.type("com.mojang.blaze3d.systems.RenderSystem")
 MoverType    = java.type("net.minecraft.world.entity.MoverType")
-Vec3         = java.type("net.minecraft.world.phys.Vec3")
+Vec3             = java.type("net.minecraft.world.phys.Vec3")
+InputConstants   = java.type("com.mojang.blaze3d.platform.InputConstants")
+GLFW_KEY_Z       = 90
 
 WEB_ROPE_MIN         = 1.0
 CONSTRAINT_STIFFNESS = 0.2
@@ -26,6 +28,13 @@ SKYHOOK_HEIGHT    = 15.0
 MIN_ANCHOR_HEIGHT = 2.0
 SCORE_THRESHOLD   = 0.15
 REUSE_PENALTY_DIST = 5.0
+
+ZIP_RANGE       = 48.0
+ZIP_COOLDOWN    = 20
+ZIP_BLOCK_TICKS = 5
+ZIP_BLOCK_SPEED = 0.4
+ZIP_ENTITY_TICKS = 10
+ZIP_ENTITY_SPEED = 0.5
 
 _YAWS    = [math.radians(a) for a in (-30, -15, 0, 15, 30)]
 _PITCHES = [math.radians(a) for a in (10, 25, 40, 55, 70)]
@@ -45,6 +54,13 @@ _rope_ticks    = 0
 _in_ground     = False
 _was_airborne  = False
 _detached      = None
+
+_zip_active   = False
+_zip_target   = None
+_zip_entity   = None
+_zip_ticks    = 0
+_zip_cooldown = 0
+_zip_prev_key = False
 
 
 def prime():
@@ -305,8 +321,148 @@ def _apply_pendulum(player):
         player.fallDistance = float32(0.0)
 
 
+def _try_zip(client):
+    global _zip_active, _zip_target, _zip_entity, _zip_ticks
+    player = client.player
+    level  = client.level
+    if player is None or level is None:
+        return
+
+    eye  = player.getEyePosition()
+    look = player.getViewVector(1.0)
+    end  = eye.add(look.x * ZIP_RANGE, look.y * ZIP_RANGE, look.z * ZIP_RANGE)
+
+    block_hit  = level.clip(ClipContext(eye, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+    block_dist = ZIP_RANGE + 1.0
+    if block_hit.getType() == HitType.BLOCK:
+        block_dist = float(eye.distanceTo(block_hit.getLocation()))
+
+    search_box  = player.getBoundingBox().expandTowards(
+        look.x * ZIP_RANGE, look.y * ZIP_RANGE, look.z * ZIP_RANGE
+    ).inflate(1.0)
+    best_entity = None
+    best_dist   = block_dist
+
+    for entity in level.getEntities(player, search_box):
+        if not entity.isAlive() or not entity.isPickable():
+            continue
+        bb  = entity.getBoundingBox().inflate(float(entity.getPickRadius()) + 0.3)
+        clip = bb.clip(eye, end)
+        if clip.isPresent():
+            dist = float(eye.distanceTo(clip.get()))
+            if dist < best_dist:
+                best_entity = entity
+                best_dist   = dist
+
+    if best_entity is not None:
+        _zip_target = best_entity.position().add(0, float(best_entity.getBbHeight()) / 2.0, 0)
+        _zip_entity = best_entity
+        _zip_active = True
+        _zip_ticks  = 0
+        Logger.info("[web] ZIP entity at ({},{},{})",
+                    str(round(float(_zip_target.x), 1)),
+                    str(round(float(_zip_target.y), 1)),
+                    str(round(float(_zip_target.z), 1)))
+    elif block_hit.getType() == HitType.BLOCK:
+        _zip_target = block_hit.getLocation()
+        _zip_entity = None
+        _zip_active = True
+        _zip_ticks  = 0
+        Logger.info("[web] ZIP block at ({},{},{})",
+                    str(round(float(_zip_target.x), 1)),
+                    str(round(float(_zip_target.y), 1)),
+                    str(round(float(_zip_target.z), 1)))
+
+
+def _tick_zip(player):
+    global _zip_active, _zip_target, _zip_entity, _zip_ticks, _zip_cooldown
+    if not _zip_active:
+        return
+
+    _zip_ticks += 1
+    max_ticks = ZIP_ENTITY_TICKS if _zip_entity is not None else ZIP_BLOCK_TICKS
+    speed     = ZIP_ENTITY_SPEED if _zip_entity is not None else ZIP_BLOCK_SPEED
+
+    if _zip_ticks > max_ticks:
+        if _zip_entity is not None and _zip_entity.isAlive():
+            player.attack(_zip_entity)
+        _zip_active  = False
+        _zip_target  = None
+        _zip_entity  = None
+        _zip_cooldown = ZIP_COOLDOWN
+        return
+
+    if _zip_entity is not None and _zip_entity.isAlive():
+        _zip_target = _zip_entity.position().add(0, float(_zip_entity.getBbHeight()) / 2.0, 0)
+
+    px = float(player.getX())
+    py = float(player.getY())
+    pz = float(player.getZ())
+    tx = float(_zip_target.x)
+    ty = float(_zip_target.y)
+    tz = float(_zip_target.z)
+
+    dx = tx - px
+    dy = ty - py
+    dz = tz - pz
+    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
+    if dist < 0.5:
+        _zip_active  = False
+        _zip_target  = None
+        _zip_entity  = None
+        _zip_cooldown = ZIP_COOLDOWN
+        return
+
+    nx = dx / dist
+    ny = dy / dist
+    nz = dz / dist
+
+    vel = player.getDeltaMovement()
+    vy_boost = 0.15 if _zip_entity is None else 0.0
+    player.setDeltaMovement(Vec3(
+        float(vel.x) + nx * speed,
+        float(vel.y) + ny * speed + vy_boost,
+        float(vel.z) + nz * speed
+    ))
+    player.fallDistance = float32(0.0)
+
+
+def _get_hand_pos(player, sub):
+    mc  = Minecraft.getInstance()
+    pos = player.getPosition(sub)
+    if mc.options.getCameraType().isFirstPerson():
+        pitch = math.radians(float(player.getXRot(sub)))
+        yaw   = math.radians(float(player.getYRot(sub)))
+        ox, oy, oz = -0.3, -0.15, 0.4
+        cos_p = math.cos(pitch)
+        sin_p = math.sin(pitch)
+        ry   = oy * cos_p - oz * sin_p
+        rz_r = oy * sin_p + oz * cos_p
+        cos_y = math.cos(yaw)
+        sin_y = math.sin(yaw)
+        hx = ox * cos_y - rz_r * sin_y
+        hz = ox * sin_y + rz_r * cos_y
+        hy = ry
+        return (float(pos.x) + hx, float(pos.y) + float(player.getEyeHeight()) + hy, float(pos.z) + hz)
+    else:
+        by = math.radians(float(player.yBodyRotO) + (float(player.yBodyRot) - float(player.yBodyRotO)) * sub)
+        cos_by = math.cos(by)
+        sin_by = math.sin(by)
+        renderer = mc.getEntityRenderDispatcher().getRenderer(player)
+        model    = renderer.getModel()
+        arm_pitch = float(model.rightArm.xRot)
+        arm_len   = 10.0 / 16.0
+        tip_down  = -arm_len * math.cos(arm_pitch)
+        tip_fwd   = arm_len * math.sin(arm_pitch)
+        return (
+            float(pos.x) - cos_by * 5.0 / 16.0 - sin_by * tip_fwd,
+            float(pos.y) + 22.0 / 16.0 + tip_down,
+            float(pos.z) - sin_by * 5.0 / 16.0 + cos_by * tip_fwd,
+        )
+
+
 def render_web_line(level_renderer, camera, delta):
-    if not _attached and _detached is None:
+    if not _attached and not _zip_active and _detached is None:
         return
     player = Minecraft.getInstance().player
     if player is None:
@@ -317,43 +473,23 @@ def render_web_line(level_renderer, camera, delta):
     alpha = 255
 
     if _attached and _anchor is not None:
-        mc = Minecraft.getInstance()
-        pos = player.getPosition(sub)
-
-        if mc.options.getCameraType().isFirstPerson():
-            pitch = math.radians(float(player.getXRot(sub)))
-            yaw = math.radians(float(player.getYRot(sub)))
-            ox, oy, oz = -0.3, -0.15, 0.4
-            cos_p = math.cos(pitch)
-            sin_p = math.sin(pitch)
-            ry = oy * cos_p - oz * sin_p
-            rz_r = oy * sin_p + oz * cos_p
-            cos_y = math.cos(yaw)
-            sin_y = math.sin(yaw)
-            hx = ox * cos_y - rz_r * sin_y
-            hz = ox * sin_y + rz_r * cos_y
-            hy = ry
-            sx = float(float(pos.x) + hx - cam.x)
-            sy = float(float(pos.y) + float(player.getEyeHeight()) + hy - cam.y)
-            sz = float(float(pos.z) + hz - cam.z)
-        else:
-            by = math.radians(float(player.yBodyRotO) + (float(player.yBodyRot) - float(player.yBodyRotO)) * sub)
-            cos_by = math.cos(by)
-            sin_by = math.sin(by)
-            renderer = mc.getEntityRenderDispatcher().getRenderer(player)
-            model = renderer.getModel()
-            arm_pitch = float(model.rightArm.xRot)
-            arm_len = 10.0 / 16.0
-            tip_down = -arm_len * math.cos(arm_pitch)
-            tip_fwd = arm_len * math.sin(arm_pitch)
-            sx = float(float(pos.x) - cos_by * 5.0 / 16.0 - sin_by * tip_fwd - cam.x)
-            sy = float(float(pos.y) + 22.0 / 16.0 + tip_down - cam.y)
-            sz = float(float(pos.z) - sin_by * 5.0 / 16.0 + cos_by * tip_fwd - cam.z)
-
+        hx, hy, hz = _get_hand_pos(player, sub)
+        sx = float(hx - cam.x)
+        sy = float(hy - cam.y)
+        sz = float(hz - cam.z)
         ex = float(_anchor.x - cam.x)
         ey = float(_anchor.y - cam.y)
         ez = float(_anchor.z - cam.z)
         t_interp = _prev_tension + (_tension - _prev_tension) * sub
+    elif _zip_active and _zip_target is not None:
+        hx, hy, hz = _get_hand_pos(player, sub)
+        sx = float(hx - cam.x)
+        sy = float(hy - cam.y)
+        sz = float(hz - cam.z)
+        ex = float(_zip_target.x - cam.x)
+        ey = float(_zip_target.y - cam.y)
+        ez = float(_zip_target.z - cam.z)
+        t_interp = 1.0
     elif _detached is not None:
         r = _detached
         sx = float(r[0] - cam.x)
@@ -429,12 +565,26 @@ def render_web_line(level_renderer, camera, delta):
 
 def web_tick(client):
     global _prev_use, _rope_length, _rope_ticks, _tension, _prev_tension, _was_airborne
+    global _zip_prev_key, _zip_cooldown, _zip_active, _zip_target, _zip_entity
     player = client.player
     if player is None or client.isPaused():
         _prev_use = False
+        _zip_prev_key = False
         return
 
     _tick_detached(client)
+
+    zip_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_Z)
+    zip_just_pressed = zip_down and not _zip_prev_key
+    _zip_prev_key = zip_down
+
+    if _zip_cooldown > 0:
+        _zip_cooldown -= 1
+
+    if _zip_active:
+        _tick_zip(player)
+    elif zip_just_pressed and _zip_cooldown == 0 and not _attached:
+        _try_zip(client)
 
     use = client.options.keyUse.isDown()
     just_pressed  = use and not _prev_use
@@ -471,5 +621,5 @@ def web_tick(client):
             target = 1.0
         _tension = _tension - (_tension - target) / 4.0
 
-    elif just_pressed:
+    elif just_pressed and not _zip_active:
         _try_shoot(client)
