@@ -23,11 +23,6 @@ WEB_ROPE_MIN         = 1.0
 CONSTRAINT_STIFFNESS = 0.2
 
 SEARCH_RANGE      = 48.0
-SKYHOOK_FORWARD   = 20.0
-SKYHOOK_HEIGHT    = 15.0
-MIN_ANCHOR_HEIGHT = 2.0
-SCORE_THRESHOLD   = 0.15
-REUSE_PENALTY_DIST = 5.0
 
 ZIP_RANGE       = 48.0
 ZIP_COOLDOWN    = 20
@@ -40,16 +35,12 @@ RAPPEL_RAMP     = 8.0
 RAPPEL_SPEED    = 0.1
 RAPPEL_MIN_LEN  = 0.5
 
-_YAWS    = [math.radians(a) for a in (-30, -15, 0, 15, 30)]
-_PITCHES = [math.radians(a) for a in (10, 25, 40, 55, 70)]
-
 WEB_SEGMENTS  = 24
 WEB_HALF_WIDTH = 0.025
 FULL_BRIGHT    = 15728880
 
 _attached      = False
 _anchor        = None
-_last_anchor   = None
 _rope_length   = 0.0
 _prev_use      = False
 _tension       = 0.0
@@ -75,55 +66,6 @@ def prime():
     return None
 
 
-def _search_direction(player):
-    vel  = player.getDeltaMovement()
-    look = player.getViewVector(1.0)
-    vh   = vel.horizontalDistance()
-    blend = min(1.0, vh / 0.3)
-    if vh < 1.0e-4:
-        hlen = (look.x ** 2 + look.z ** 2) ** 0.5
-        return (look.x / hlen, look.z / hlen) if hlen > 1.0e-4 else (0.0, 1.0)
-    vx = vel.x / vh
-    vz = vel.z / vh
-    sx = look.x * (1.0 - blend) + vx * blend
-    sz = look.z * (1.0 - blend) + vz * blend
-    sh = (sx * sx + sz * sz) ** 0.5
-    if sh < 1.0e-4:
-        return (vx, vz)
-    return (sx / sh, sz / sh)
-
-
-def _score_candidate(player_pos, player_vel, hit_pos):
-    dx = hit_pos.x - player_pos.x
-    dy = hit_pos.y - player_pos.y
-    dz = hit_pos.z - player_pos.z
-    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-
-    if dy < MIN_ANCHOR_HEIGHT:
-        return -1.0
-
-    dist_score   = max(0.0, 1.0 - ((dist - 20.0) / 15.0) ** 2)
-    height_score = max(0.0, 1.0 - ((dy - 14.0) / 10.0) ** 2)
-
-    vel_h = player_vel.horizontalDistance()
-    if vel_h > 0.1:
-        horiz = (dx * dx + dz * dz) ** 0.5
-        alignment = (player_vel.x * dx + player_vel.z * dz) / (vel_h * horiz) if horiz > 0.01 else 0.0
-        vel_score = (alignment + 1.0) / 2.0
-    else:
-        vel_score = 0.5
-
-    horiz = (dx * dx + dz * dz) ** 0.5
-    arc_score = min(1.0, horiz / 10.0)
-
-    score = dist_score * 0.20 + height_score * 0.25 + vel_score * 0.35 + arc_score * 0.20
-
-    if _last_anchor is not None and hit_pos.distanceTo(_last_anchor) < REUSE_PENALTY_DIST:
-        score *= 0.5
-
-    return score
-
-
 def _try_shoot(client):
     global _attached, _anchor, _rope_length, _tension, _prev_tension, _rope_ticks, _in_ground, _was_airborne
     player = client.player
@@ -133,66 +75,32 @@ def _try_shoot(client):
     if not player.getMainHandItem().isEmpty():
         return
 
+    eye  = player.getEyePosition()
+    look = player.getViewVector(1.0)
+    end  = eye.add(look.x * SEARCH_RANGE, look.y * SEARCH_RANGE, look.z * SEARCH_RANGE)
+    hit  = level.clip(ClipContext(eye, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+    if hit.getType() != HitType.BLOCK:
+        return
+
     pos = player.position()
-    eye = player.getEyePosition()
-    vel = player.getDeltaMovement()
-    sx, sz = _search_direction(player)
-
-    best_score = -1.0
-    best_point = None
-
-    for yaw in _YAWS:
-        sin_y = math.sin(yaw)
-        cos_y = math.cos(yaw)
-        rx = sx * cos_y - sz * sin_y
-        rz = sx * sin_y + sz * cos_y
-
-        for pitch in _PITCHES:
-            sin_p = math.sin(pitch)
-            cos_p = math.cos(pitch)
-            dx = rx * cos_p
-            dy = sin_p
-            dz = rz * cos_p
-
-            end = eye.add(dx * SEARCH_RANGE, dy * SEARCH_RANGE, dz * SEARCH_RANGE)
-            hit = level.clip(
-                ClipContext(eye, end, ClipBlock.COLLIDER, ClipFluid.NONE, player)
-            )
-            if hit.getType() != HitType.BLOCK:
-                continue
-
-            score = _score_candidate(pos, vel, hit.getLocation())
-            if score > best_score:
-                best_score = score
-                best_point = hit.getLocation()
-
-    if best_score >= SCORE_THRESHOLD and best_point is not None:
-        _anchor = best_point
-        _in_ground = True
-        Logger.info("[web] ATTACHED to block at ({},{},{}) score={} rope={}",
-                     str(round(float(_anchor.x), 1)), str(round(float(_anchor.y), 1)), str(round(float(_anchor.z), 1)),
-                     str(round(best_score, 3)), str(round(float(pos.distanceTo(_anchor)), 1)))
-    else:
-        _anchor = pos.add(sx * SKYHOOK_FORWARD, SKYHOOK_HEIGHT, sz * SKYHOOK_FORWARD)
-        _in_ground = False
-        Logger.info("[web] SKYHOOK at ({},{},{}) bestScore={}",
-                     str(round(float(_anchor.x), 1)), str(round(float(_anchor.y), 1)), str(round(float(_anchor.z), 1)),
-                     str(round(best_score, 3)))
-
+    _anchor = hit.getLocation()
+    _in_ground = True
     _rope_length = max(WEB_ROPE_MIN, pos.distanceTo(_anchor))
     _attached = True
     _tension = 0.0
     _prev_tension = 0.0
     _rope_ticks = 0
     _was_airborne = False
+    Logger.info("[web] ATTACHED at ({},{},{}) rope={}",
+                str(round(float(_anchor.x), 1)), str(round(float(_anchor.y), 1)), str(round(float(_anchor.z), 1)),
+                str(round(float(_rope_length), 1)))
 
 
 def _detach(player):
-    global _attached, _anchor, _last_anchor, _rope_length, _detached
+    global _attached, _anchor, _rope_length, _detached
     global _tension, _prev_tension, _rope_ticks
     global _rappel_timer, _rappel_prev_timer, _rappel_direction
     Logger.info("[web] DETACHED")
-    _last_anchor = _anchor
     vel = player.getDeltaMovement()
     px, py, pz = float(player.getX()), float(player.getY()), float(player.getZ())
     _detached = [
