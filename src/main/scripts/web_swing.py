@@ -82,10 +82,10 @@ def _try_shoot(client):
     if hit.getType() != HitType.BLOCK:
         return
 
-    pos = player.position()
     _anchor = hit.getLocation()
     _in_ground = True
-    _rope_length = max(WEB_ROPE_MIN, pos.distanceTo(_anchor))
+    attach_point = player.position().add(0.0, float(player.getBbHeight()), 0.0)
+    _rope_length = max(WEB_ROPE_MIN, attach_point.distanceTo(_anchor))
     _attached = True
     _tension = 0.0
     _prev_tension = 0.0
