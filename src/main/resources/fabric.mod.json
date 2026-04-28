@@ -9,8 +9,7 @@
   "environment": "client",
   "entrypoints": {
     "client": [
-      "com.example.spideysenses.SpideySensesClient",
-      "dev.elide.lang.minecraft.PolyglotReloadKeybind"
+      "com.example.spideysenses.SpideySensesClient"
     ]
   },
   "mixins": [

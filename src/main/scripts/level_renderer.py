@@ -1,5 +1,4 @@
-"""Runs the world-space sense post-effect at LevelRenderer.renderLevel TAIL,
-where minecraft:main's depth buffer is still valid."""
+"""LevelRenderer.renderLevel TAIL hook for web line rendering + sense post-effect."""
 
 from elide import mixin
 

@@ -36,6 +36,10 @@ ZIP_BLOCK_SPEED = 0.4
 ZIP_ENTITY_TICKS = 10
 ZIP_ENTITY_SPEED = 0.5
 
+RAPPEL_RAMP     = 8.0
+RAPPEL_SPEED    = 0.1
+RAPPEL_MIN_LEN  = 0.5
+
 _YAWS    = [math.radians(a) for a in (-30, -15, 0, 15, 30)]
 _PITCHES = [math.radians(a) for a in (10, 25, 40, 55, 70)]
 
@@ -61,6 +65,10 @@ _zip_entity   = None
 _zip_ticks    = 0
 _zip_cooldown = 0
 _zip_prev_key = False
+
+_rappel_timer      = 0.0
+_rappel_prev_timer = 0.0
+_rappel_direction  = 0
 
 
 def prime():
@@ -182,6 +190,7 @@ def _try_shoot(client):
 def _detach(player):
     global _attached, _anchor, _last_anchor, _rope_length, _detached
     global _tension, _prev_tension, _rope_ticks
+    global _rappel_timer, _rappel_prev_timer, _rappel_direction
     Logger.info("[web] DETACHED")
     _last_anchor = _anchor
     vel = player.getDeltaMovement()
@@ -199,6 +208,9 @@ def _detach(player):
     _tension     = 0.0
     _prev_tension = 0.0
     _rope_ticks  = 0
+    _rappel_timer      = 0.0
+    _rappel_prev_timer = 0.0
+    _rappel_direction  = 0
 
 
 def _ground_boost_detach(player):
@@ -257,12 +269,12 @@ def _tick_detached(client):
     r[13] = r[13] - (r[13] - target) / 4.0
 
 
-def _restrict_motion(ax, ay, az, ex, ey, ez):
+def _restrict_motion(ax, ay, az, ex, ey, ez, eff_rope=None):
     dx = ax - ex
     dy = ay - ey
     dz = az - ez
     dist_sq = dx * dx + dy * dy + dz * dz
-    rope = max(_rope_length, WEB_ROPE_MIN)
+    rope = max(eff_rope if eff_rope is not None else _rope_length, WEB_ROPE_MIN)
     if dist_sq > rope * rope:
         dist = dist_sq ** 0.5
         overshoot = (dist - rope) * CONSTRAINT_STIFFNESS
@@ -278,31 +290,35 @@ def _apply_pendulum(player):
     py = float(player.getY()) + float(player.getBbHeight())
     pz = float(player.getZ())
 
-    v = _restrict_motion(ax, ay, az, px, py, pz)
+    eff_rope = max(_rope_length - _rappel_timer * float(player.getBbHeight()), RAPPEL_MIN_LEN)
+
+    v = _restrict_motion(ax, ay, az, px, py, pz, eff_rope)
     if v is None:
         return
 
     vx, vy, vz = v
 
-    vel = player.getDeltaMovement()
-    speed = (float(vel.x) ** 2 + float(vel.y) ** 2 + float(vel.z) ** 2) ** 0.5
-    move = player.input.getMoveVector()
-    fwd = float(move.y)
-    strafe = float(move.x)
-    mag = (fwd * fwd + strafe * strafe) ** 0.5
-    if mag >= 1.0e-4:
-        if mag > 1.0:
-            fwd /= mag
-            strafe /= mag
-        look = player.getViewVector(1.0)
-        hlen = (look.x ** 2 + look.z ** 2) ** 0.5
-        if hlen > 1.0e-4:
-            fx = look.x / hlen
-            fz = look.z / hlen
-            ix = fx * fwd + fz * strafe
-            iz = fz * fwd + (-fx) * strafe
-            input_force = min(2.0, speed) / 12.0
-            player.setDeltaMovement(vel.add(ix * input_force, 0.0, iz * input_force))
+    steer_scale = 1.0 - _rappel_timer
+    if steer_scale > 1.0e-4:
+        vel = player.getDeltaMovement()
+        speed = (float(vel.x) ** 2 + float(vel.y) ** 2 + float(vel.z) ** 2) ** 0.5
+        move = player.input.getMoveVector()
+        fwd = float(move.y)
+        strafe = float(move.x)
+        mag = (fwd * fwd + strafe * strafe) ** 0.5
+        if mag >= 1.0e-4:
+            if mag > 1.0:
+                fwd /= mag
+                strafe /= mag
+            look = player.getViewVector(1.0)
+            hlen = (look.x ** 2 + look.z ** 2) ** 0.5
+            if hlen > 1.0e-4:
+                fx = look.x / hlen
+                fz = look.z / hlen
+                ix = fx * fwd + fz * strafe
+                iz = fz * fwd + (-fx) * strafe
+                input_force = min(2.0, speed) / 12.0 * steer_scale
+                player.setDeltaMovement(vel.add(ix * input_force, 0.0, iz * input_force))
 
     player.move(MoverType.SELF, Vec3(vx, vy, vz))
 
@@ -311,7 +327,7 @@ def _apply_pendulum(player):
 
     vel = player.getDeltaMovement()
     v1 = _restrict_motion(ax, ay, az,
-                          px + float(vel.x), py + float(vel.y), pz + float(vel.z))
+                          px + float(vel.x), py + float(vel.y), pz + float(vel.z), eff_rope)
     if v1 is not None:
         player.setDeltaMovement(player.getDeltaMovement().add(
             v1[0] - vx, v1[1] - vy, v1[2] - vz))
@@ -425,6 +441,52 @@ def _tick_zip(player):
         float(vel.z) + nz * speed
     ))
     player.fallDistance = float32(0.0)
+
+
+def _tick_rappel(player):
+    global _rappel_timer, _rappel_prev_timer, _rappel_direction, _rope_length
+
+    _rappel_prev_timer = _rappel_timer
+
+    sneaking = player.isShiftKeyDown()
+
+    if sneaking:
+        was = _rappel_timer
+        _rappel_timer = min(1.0, _rappel_timer + 1.0 / RAPPEL_RAMP)
+        if was == 0.0:
+            Logger.info("[rappel] ENTERING")
+        if _rappel_timer >= 1.0 and was < 1.0:
+            Logger.info("[rappel] FULL  rope={}", str(round(_rope_length, 2)))
+    else:
+        was = _rappel_timer
+        _rappel_timer = max(0.0, _rappel_timer - 1.0 / RAPPEL_RAMP)
+        if was > 0.0 and _rappel_timer == 0.0:
+            Logger.info("[rappel] EXITED")
+        _rappel_direction = 0
+        return
+
+    if _rappel_timer >= 1.0:
+        kp = player.input.keyPresses
+        if kp.forward():
+            _rappel_direction = 1
+        elif kp.backward():
+            _rappel_direction = -1
+        else:
+            _rappel_direction = 0
+    else:
+        _rappel_direction = 0
+
+    min_rope = RAPPEL_MIN_LEN + _rappel_timer * float(player.getBbHeight())
+
+    if _rappel_direction != 0:
+        new_len = max(_rope_length - RAPPEL_SPEED * _rappel_direction, min_rope)
+        if new_len != _rope_length:
+            _rope_length = new_len
+            Logger.info("[rappel] ADJUST dir={} rope={} eff={}",
+                        str(_rappel_direction), str(round(_rope_length, 2)),
+                        str(round(max(_rope_length - _rappel_timer * float(player.getBbHeight()), RAPPEL_MIN_LEN), 2)))
+        else:
+            _rappel_direction = 0
 
 
 def _get_hand_pos(player, sub):
@@ -601,10 +663,16 @@ def web_tick(client):
             _detach(player)
             return
 
+        if _rappel_timer > 0.0 and player.onGround():
+            Logger.info("[rappel] LANDED — disconnecting")
+            _detach(player)
+            return
+
         if _was_airborne and player.onGround() and _rope_ticks > 10:
             _ground_boost_detach(player)
             return
 
+        _tick_rappel(player)
         _apply_pendulum(player)
 
         _prev_tension = _tension
@@ -614,9 +682,10 @@ def web_tick(client):
         ax = float(_anchor.x)
         ay = float(_anchor.y)
         az = float(_anchor.z)
+        eff = max(_rope_length - _rappel_timer * float(player.getBbHeight()), RAPPEL_MIN_LEN)
         length = ((ax - px) ** 2 + (ay - py) ** 2 + (az - pz) ** 2) ** 0.5
         if _in_ground:
-            target = min((length + 1.0) / _rope_length, 1.0)
+            target = min((length + 1.0) / eff, 1.0)
         else:
             target = 1.0
         _tension = _tension - (_tension - target) / 4.0
