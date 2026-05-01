@@ -61,9 +61,6 @@ _zip_anchor_r   = None
 _zip_converging = True
 _zip_holding    = False
 
-_debug_rays = []
-_debug_eye  = None
-
 _rappel_timer      = 0.0
 _rappel_prev_timer = 0.0
 _rappel_direction  = 0
@@ -315,13 +312,9 @@ def _try_zip(client):
     else:
         yaw_rad = math.radians(float(player.getYRot(1.0)))
         best_l = None
-        best_l_pitch = 999
-        best_l_habs  = 0
-        best_l_dist  = 0.0
+        best_l_score = -1.0
         best_r = None
-        best_r_pitch = 999
-        best_r_habs  = 0
-        best_r_dist  = 0.0
+        best_r_score = -1.0
 
         for h_deg in list(range(-45, -3, 4)) + list(range(5, 46, 4)):
             for p_deg in range(-20, 21, 5):
@@ -335,17 +328,13 @@ def _try_zip(client):
                 if hit.getType() != HitType.BLOCK:
                     continue
                 dist = float(eye.distanceTo(hit.getLocation()))
-                abs_h = abs(h_deg)
-                if h_deg < 0 and (abs_h > best_l_habs or (abs_h == best_l_habs and (dist > best_l_dist or (dist == best_l_dist and p_deg < best_l_pitch)))):
+                score = 0.45 * (dist / ZIP_RANGE) + 0.35 * (abs(h_deg) / 45.0) + 0.2 * ((20.0 - p_deg) / 40.0)
+                if h_deg < 0 and score > best_l_score:
                     best_l = hit.getLocation()
-                    best_l_habs = abs_h
-                    best_l_dist = dist
-                    best_l_pitch = p_deg
-                elif h_deg > 0 and (abs_h > best_r_habs or (abs_h == best_r_habs and (dist > best_r_dist or (dist == best_r_dist and p_deg < best_r_pitch)))):
+                    best_l_score = score
+                elif h_deg > 0 and score > best_r_score:
                     best_r = hit.getLocation()
-                    best_r_habs = abs_h
-                    best_r_dist = dist
-                    best_r_pitch = p_deg
+                    best_r_score = score
 
         if best_l is not None and best_r is not None:
             _zip_anchor_l = best_l
@@ -513,64 +502,6 @@ def _get_hand_pos(player, sub, side='right'):
         )
 
 
-def _update_debug_cone(client):
-    global _debug_rays, _debug_eye
-    player = client.player
-    level  = client.level
-    if player is None or level is None:
-        _debug_rays = []
-        return
-
-    eye = player.getEyePosition()
-    _debug_eye = eye
-    yaw_rad = math.radians(float(player.getYRot(1.0)))
-    rays = []
-
-    best_l_idx   = -1
-    best_l_pitch = 999
-    best_l_habs  = 0
-    best_l_dist  = 0.0
-    best_r_idx   = -1
-    best_r_pitch = 999
-    best_r_habs  = 0
-    best_r_dist  = 0.0
-    idx = 0
-
-    for h_deg in (-45, -37, -30, -22, -15, -7, 7, 15, 22, 30, 37, 45):
-        for p_deg in (-20, -10, 0, 10, 20):
-            p_rad = math.radians(p_deg)
-            ray_yaw = yaw_rad + math.radians(h_deg)
-            dx = -math.sin(ray_yaw) * math.cos(p_rad)
-            dy = -math.sin(p_rad)
-            dz = math.cos(ray_yaw) * math.cos(p_rad)
-            ray_end = eye.add(dx * ZIP_RANGE, dy * ZIP_RANGE, dz * ZIP_RANGE)
-            hit = level.clip(ClipContext(eye, ray_end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
-            if hit.getType() == HitType.BLOCK:
-                loc = hit.getLocation()
-                dist = float(eye.distanceTo(loc))
-                abs_h = abs(h_deg)
-                rays.append((float(loc.x), float(loc.y), float(loc.z), True))
-                if h_deg < 0 and (abs_h > best_l_habs or (abs_h == best_l_habs and (dist > best_l_dist or (dist == best_l_dist and p_deg < best_l_pitch)))):
-                    best_l_idx = idx
-                    best_l_habs = abs_h
-                    best_l_dist = dist
-                    best_l_pitch = p_deg
-                elif h_deg > 0 and (abs_h > best_r_habs or (abs_h == best_r_habs and (dist > best_r_dist or (dist == best_r_dist and p_deg < best_r_pitch)))):
-                    best_r_idx = idx
-                    best_r_habs = abs_h
-                    best_r_dist = dist
-                    best_r_pitch = p_deg
-            else:
-                rays.append((float(ray_end.x), float(ray_end.y), float(ray_end.z), False))
-            idx += 1
-
-    for i in range(len(rays)):
-        ex, ey, ez, did_hit = rays[i]
-        if i == best_l_idx or i == best_r_idx:
-            rays[i] = (ex, ey, ez, 'candidate')
-    _debug_rays = rays
-
-
 def _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha, cr=255, cg=255, cb=255):
     rdx = ex - sx
     rdy = ey - sy
@@ -618,6 +549,8 @@ def _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha, cr=255, cg=255, cb=255
 
 
 def render_web_line(level_renderer, camera, delta):
+    if not _attached and not _zip_active and _detached is None:
+        return
     player = Minecraft.getInstance().player
     if player is None:
         return
@@ -628,19 +561,6 @@ def render_web_line(level_renderer, camera, delta):
     mv = RenderSystem.getModelViewStack()
     mv.pushMatrix()
     mv.set(camera.viewRotationMatrix)
-
-    if _debug_rays and _debug_eye is not None:
-        ox = float(_debug_eye.x - cam.x)
-        oy = float(_debug_eye.y - cam.y)
-        oz = float(_debug_eye.z - cam.z)
-        for (rex, rey, rez, status) in _debug_rays:
-            dex = float(rex - cam.x)
-            dey = float(rey - cam.y)
-            dez = float(rez - cam.z)
-            if status == 'candidate':
-                _draw_strand(ox, oy, oz, dex, dey, dez, 1.0, 255, 255, 255, 0)
-            elif status:
-                _draw_strand(ox, oy, oz, dex, dey, dez, 1.0, 200, 0, 255, 0)
 
     if _attached and _anchor is not None:
         hx, hy, hz = _get_hand_pos(player, sub)
@@ -689,7 +609,6 @@ def web_tick(client):
         return
 
     _tick_detached(client)
-    _update_debug_cone(client)
 
     zip_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_Z)
     zip_just_pressed = zip_down and not _zip_prev_key
