@@ -120,7 +120,7 @@ def tether_tick(client, player):
             _detach_tether()
         else:
             _tick_tether(player)
-    elif tether_just_pressed and not _attached and not _zip_active:
+    elif tether_just_pressed and not _attached and not _zip_active and not _wall_active:
         _try_tether(client)
 
 

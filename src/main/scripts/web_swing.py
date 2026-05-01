@@ -50,6 +50,7 @@ _rappel_direction  = 0
 
 exec(open("src/main/scripts/web_zip.py").read())
 exec(open("src/main/scripts/web_tether.py").read())
+exec(open("src/main/scripts/web_wall_run.py").read())
 
 
 def prime():
@@ -416,11 +417,13 @@ def web_tick(client):
         _prev_use = False
         zip_reset_keys()
         tether_reset_keys()
+        wall_reset_keys()
         return
 
     _tick_detached(client)
     tether_tick(client, player)
     zip_tick(client, player)
+    wall_tick(client, player)
 
     use = client.options.keyUse.isDown()
     just_pressed  = use and not _prev_use
@@ -464,5 +467,5 @@ def web_tick(client):
             target = 1.0
         _tension = _tension - (_tension - target) / 4.0
 
-    elif just_pressed and not _zip_active and not _tether_active:
+    elif just_pressed and not _zip_active and not _tether_active and not _wall_active:
         _try_shoot(client)

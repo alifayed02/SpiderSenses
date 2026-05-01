@@ -227,7 +227,7 @@ def zip_tick(client, player):
                     _zip_ticks = 0
         else:
             _tick_zip(player)
-    elif zip_just_pressed and _zip_cooldown == 0 and not _attached and not _tether_active:
+    elif zip_just_pressed and _zip_cooldown == 0 and not _attached and not _tether_active and not _wall_active:
         _try_zip(client)
 
 
