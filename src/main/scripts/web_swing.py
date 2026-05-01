@@ -56,6 +56,13 @@ _zip_entity   = None
 _zip_ticks    = 0
 _zip_cooldown = 0
 _zip_prev_key = False
+_zip_anchor_l   = None
+_zip_anchor_r   = None
+_zip_converging = True
+_zip_holding    = False
+
+_debug_rays = []
+_debug_eye  = None
 
 _rappel_timer      = 0.0
 _rappel_prev_timer = 0.0
@@ -247,6 +254,7 @@ def _apply_pendulum(player):
 
 def _try_zip(client):
     global _zip_active, _zip_target, _zip_entity, _zip_ticks
+    global _zip_anchor_l, _zip_anchor_r, _zip_converging, _zip_holding
     player = client.player
     level  = client.level
     if player is None or level is None:
@@ -281,6 +289,10 @@ def _try_zip(client):
     if best_entity is not None:
         _zip_target = best_entity.position().add(0, float(best_entity.getBbHeight()) / 2.0, 0)
         _zip_entity = best_entity
+        _zip_anchor_l = _zip_target
+        _zip_anchor_r = _zip_target
+        _zip_converging = True
+        _zip_holding = True
         _zip_active = True
         _zip_ticks  = 0
         Logger.info("[web] ZIP entity at ({},{},{})",
@@ -290,16 +302,75 @@ def _try_zip(client):
     elif block_hit.getType() == HitType.BLOCK:
         _zip_target = block_hit.getLocation()
         _zip_entity = None
+        _zip_anchor_l = _zip_target
+        _zip_anchor_r = _zip_target
+        _zip_converging = True
+        _zip_holding = True
         _zip_active = True
         _zip_ticks  = 0
         Logger.info("[web] ZIP block at ({},{},{})",
                     str(round(float(_zip_target.x), 1)),
                     str(round(float(_zip_target.y), 1)),
                     str(round(float(_zip_target.z), 1)))
+    else:
+        yaw_rad = math.radians(float(player.getYRot(1.0)))
+        best_l = None
+        best_l_pitch = 999
+        best_l_habs  = 0
+        best_l_dist  = 0.0
+        best_r = None
+        best_r_pitch = 999
+        best_r_habs  = 0
+        best_r_dist  = 0.0
+
+        for h_deg in list(range(-45, -3, 4)) + list(range(5, 46, 4)):
+            for p_deg in range(-20, 21, 5):
+                p_rad = math.radians(p_deg)
+                ray_yaw = yaw_rad + math.radians(h_deg)
+                dx = -math.sin(ray_yaw) * math.cos(p_rad)
+                dy = -math.sin(p_rad)
+                dz = math.cos(ray_yaw) * math.cos(p_rad)
+                ray_end = eye.add(dx * ZIP_RANGE, dy * ZIP_RANGE, dz * ZIP_RANGE)
+                hit = level.clip(ClipContext(eye, ray_end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+                if hit.getType() != HitType.BLOCK:
+                    continue
+                dist = float(eye.distanceTo(hit.getLocation()))
+                abs_h = abs(h_deg)
+                if h_deg < 0 and (abs_h > best_l_habs or (abs_h == best_l_habs and (dist > best_l_dist or (dist == best_l_dist and p_deg < best_l_pitch)))):
+                    best_l = hit.getLocation()
+                    best_l_habs = abs_h
+                    best_l_dist = dist
+                    best_l_pitch = p_deg
+                elif h_deg > 0 and (abs_h > best_r_habs or (abs_h == best_r_habs and (dist > best_r_dist or (dist == best_r_dist and p_deg < best_r_pitch)))):
+                    best_r = hit.getLocation()
+                    best_r_habs = abs_h
+                    best_r_dist = dist
+                    best_r_pitch = p_deg
+
+        if best_l is not None and best_r is not None:
+            _zip_anchor_l = best_l
+            _zip_anchor_r = best_r
+            mid_x = (float(_zip_anchor_l.x) + float(_zip_anchor_r.x)) / 2.0
+            mid_y = (float(_zip_anchor_l.y) + float(_zip_anchor_r.y)) / 2.0
+            mid_z = (float(_zip_anchor_l.z) + float(_zip_anchor_r.z)) / 2.0
+            _zip_target = Vec3(mid_x, mid_y, mid_z)
+            _zip_entity = None
+            _zip_converging = False
+            _zip_holding = True
+            _zip_active = True
+            _zip_ticks = 0
+            Logger.info("[web] ZIP diverge L=({},{},{}) R=({},{},{})",
+                        str(round(float(_zip_anchor_l.x), 1)),
+                        str(round(float(_zip_anchor_l.y), 1)),
+                        str(round(float(_zip_anchor_l.z), 1)),
+                        str(round(float(_zip_anchor_r.x), 1)),
+                        str(round(float(_zip_anchor_r.y), 1)),
+                        str(round(float(_zip_anchor_r.z), 1)))
 
 
 def _tick_zip(player):
     global _zip_active, _zip_target, _zip_entity, _zip_ticks, _zip_cooldown
+    global _zip_anchor_l, _zip_anchor_r
     if not _zip_active:
         return
 
@@ -310,14 +381,18 @@ def _tick_zip(player):
     if _zip_ticks > max_ticks:
         if _zip_entity is not None and _zip_entity.isAlive():
             player.attack(_zip_entity)
-        _zip_active  = False
-        _zip_target  = None
-        _zip_entity  = None
+        _zip_active   = False
+        _zip_target   = None
+        _zip_entity   = None
+        _zip_anchor_l = None
+        _zip_anchor_r = None
         _zip_cooldown = ZIP_COOLDOWN
         return
 
     if _zip_entity is not None and _zip_entity.isAlive():
         _zip_target = _zip_entity.position().add(0, float(_zip_entity.getBbHeight()) / 2.0, 0)
+        _zip_anchor_l = _zip_target
+        _zip_anchor_r = _zip_target
 
     px = float(player.getX())
     py = float(player.getY())
@@ -331,9 +406,11 @@ def _tick_zip(player):
     dz = tz - pz
     dist = (dx * dx + dy * dy + dz * dz) ** 0.5
     if dist < 0.5:
-        _zip_active  = False
-        _zip_target  = None
-        _zip_entity  = None
+        _zip_active   = False
+        _zip_target   = None
+        _zip_entity   = None
+        _zip_anchor_l = None
+        _zip_anchor_r = None
         _zip_cooldown = ZIP_COOLDOWN
         return
 
@@ -397,13 +474,14 @@ def _tick_rappel(player):
             _rappel_direction = 0
 
 
-def _get_hand_pos(player, sub):
+def _get_hand_pos(player, sub, side='right'):
     mc  = Minecraft.getInstance()
     pos = player.getPosition(sub)
     if mc.options.getCameraType().isFirstPerson():
         pitch = math.radians(float(player.getXRot(sub)))
         yaw   = math.radians(float(player.getYRot(sub)))
-        ox, oy, oz = -0.3, -0.15, 0.4
+        ox = -0.3 if side == 'right' else 0.3
+        oy, oz = -0.15, 0.4
         cos_p = math.cos(pitch)
         sin_p = math.sin(pitch)
         ry   = oy * cos_p - oz * sin_p
@@ -420,61 +498,80 @@ def _get_hand_pos(player, sub):
         sin_by = math.sin(by)
         renderer = mc.getEntityRenderDispatcher().getRenderer(player)
         model    = renderer.getModel()
-        arm_pitch = float(model.rightArm.xRot)
+        if side == 'right':
+            arm_pitch = float(model.rightArm.xRot)
+        else:
+            arm_pitch = float(model.leftArm.xRot)
         arm_len   = 10.0 / 16.0
         tip_down  = -arm_len * math.cos(arm_pitch)
         tip_fwd   = arm_len * math.sin(arm_pitch)
+        sign = -1.0 if side == 'right' else 1.0
         return (
-            float(pos.x) - cos_by * 5.0 / 16.0 - sin_by * tip_fwd,
+            float(pos.x) + sign * cos_by * 5.0 / 16.0 - sin_by * tip_fwd,
             float(pos.y) + 22.0 / 16.0 + tip_down,
-            float(pos.z) - sin_by * 5.0 / 16.0 + cos_by * tip_fwd,
+            float(pos.z) + sign * sin_by * 5.0 / 16.0 + cos_by * tip_fwd,
         )
 
 
-def render_web_line(level_renderer, camera, delta):
-    if not _attached and not _zip_active and _detached is None:
-        return
-    player = Minecraft.getInstance().player
-    if player is None:
-        return
-
-    sub = float(delta.getGameTimeDeltaPartialTick(True))
-    cam = camera.pos
-    alpha = 255
-
-    if _attached and _anchor is not None:
-        hx, hy, hz = _get_hand_pos(player, sub)
-        sx = float(hx - cam.x)
-        sy = float(hy - cam.y)
-        sz = float(hz - cam.z)
-        ex = float(_anchor.x - cam.x)
-        ey = float(_anchor.y - cam.y)
-        ez = float(_anchor.z - cam.z)
-        t_interp = _prev_tension + (_tension - _prev_tension) * sub
-    elif _zip_active and _zip_target is not None:
-        hx, hy, hz = _get_hand_pos(player, sub)
-        sx = float(hx - cam.x)
-        sy = float(hy - cam.y)
-        sz = float(hz - cam.z)
-        ex = float(_zip_target.x - cam.x)
-        ey = float(_zip_target.y - cam.y)
-        ez = float(_zip_target.z - cam.z)
-        t_interp = 1.0
-    elif _detached is not None:
-        r = _detached
-        sx = float(r[0] - cam.x)
-        sy = float(r[1] - cam.y)
-        sz = float(r[2] - cam.z)
-        ex = float((r[9] + (r[3] - r[9]) * sub) - cam.x)
-        ey = float((r[10] + (r[4] - r[10]) * sub) - cam.y)
-        ez = float((r[11] + (r[5] - r[11]) * sub) - cam.z)
-        t_interp = r[14] + (r[13] - r[14]) * sub
-        alpha = max(0, int(255 * (1.0 - (r[15] + sub) / 60.0)))
-        if alpha <= 0:
-            return
-    else:
+def _update_debug_cone(client):
+    global _debug_rays, _debug_eye
+    player = client.player
+    level  = client.level
+    if player is None or level is None:
+        _debug_rays = []
         return
 
+    eye = player.getEyePosition()
+    _debug_eye = eye
+    yaw_rad = math.radians(float(player.getYRot(1.0)))
+    rays = []
+
+    best_l_idx   = -1
+    best_l_pitch = 999
+    best_l_habs  = 0
+    best_l_dist  = 0.0
+    best_r_idx   = -1
+    best_r_pitch = 999
+    best_r_habs  = 0
+    best_r_dist  = 0.0
+    idx = 0
+
+    for h_deg in (-45, -37, -30, -22, -15, -7, 7, 15, 22, 30, 37, 45):
+        for p_deg in (-20, -10, 0, 10, 20):
+            p_rad = math.radians(p_deg)
+            ray_yaw = yaw_rad + math.radians(h_deg)
+            dx = -math.sin(ray_yaw) * math.cos(p_rad)
+            dy = -math.sin(p_rad)
+            dz = math.cos(ray_yaw) * math.cos(p_rad)
+            ray_end = eye.add(dx * ZIP_RANGE, dy * ZIP_RANGE, dz * ZIP_RANGE)
+            hit = level.clip(ClipContext(eye, ray_end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+            if hit.getType() == HitType.BLOCK:
+                loc = hit.getLocation()
+                dist = float(eye.distanceTo(loc))
+                abs_h = abs(h_deg)
+                rays.append((float(loc.x), float(loc.y), float(loc.z), True))
+                if h_deg < 0 and (abs_h > best_l_habs or (abs_h == best_l_habs and (dist > best_l_dist or (dist == best_l_dist and p_deg < best_l_pitch)))):
+                    best_l_idx = idx
+                    best_l_habs = abs_h
+                    best_l_dist = dist
+                    best_l_pitch = p_deg
+                elif h_deg > 0 and (abs_h > best_r_habs or (abs_h == best_r_habs and (dist > best_r_dist or (dist == best_r_dist and p_deg < best_r_pitch)))):
+                    best_r_idx = idx
+                    best_r_habs = abs_h
+                    best_r_dist = dist
+                    best_r_pitch = p_deg
+            else:
+                rays.append((float(ray_end.x), float(ray_end.y), float(ray_end.z), False))
+            idx += 1
+
+    for i in range(len(rays)):
+        ex, ey, ez, did_hit = rays[i]
+        if i == best_l_idx or i == best_r_idx:
+            rays[i] = (ex, ey, ez, 'candidate')
+    _debug_rays = rays
+
+
+def _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha, cr=255, cg=255, cb=255):
     rdx = ex - sx
     rdy = ey - sy
     rdz = ez - sz
@@ -483,25 +580,14 @@ def render_web_line(level_renderer, camera, delta):
         return
 
     rt = 1.0 - t_interp
-    if rt < 0.001:
-        segments = 1
-    else:
-        segments = WEB_SEGMENTS
+    segments = 1 if rt < 0.001 else WEB_SEGMENTS
 
     if sy > ey:
-        mid_x = sx
-        mid_y = sy + (ey - sy) * rt * 2.0
-        mid_z = sz
+        mid_x, mid_y, mid_z = sx, sy + (ey - sy) * rt * 2.0, sz
     else:
-        mid_x = ex
-        mid_y = ey + (sy - ey) * rt * 2.0
-        mid_z = ez
+        mid_x, mid_y, mid_z = ex, ey + (sy - ey) * rt * 2.0, ez
 
     hw = WEB_HALF_WIDTH
-
-    mv = RenderSystem.getModelViewStack()
-    mv.pushMatrix()
-    mv.set(camera.viewRotationMatrix)
 
     leash = RenderTypes.leash()
     builder = Tesselator.getInstance().begin(leash.mode(), leash.format())
@@ -524,18 +610,78 @@ def render_web_line(level_renderer, camera, delta):
             by = by / bl * hw
             bz = bz / bl * hw
 
-        builder.addVertex(float32(px - bx), float32(py - by), float32(pz - bz)).setColor(255, 255, 255, alpha).setLight(FULL_BRIGHT)
-        builder.addVertex(float32(px + bx), float32(py + by), float32(pz + bz)).setColor(255, 255, 255, alpha).setLight(FULL_BRIGHT)
+        builder.addVertex(float32(px - bx), float32(py - by), float32(pz - bz)).setColor(cr, cg, cb, alpha).setLight(FULL_BRIGHT)
+        builder.addVertex(float32(px + bx), float32(py + by), float32(pz + bz)).setColor(cr, cg, cb, alpha).setLight(FULL_BRIGHT)
 
     mesh = builder.buildOrThrow()
     leash.draw(mesh)
+
+
+def render_web_line(level_renderer, camera, delta):
+    player = Minecraft.getInstance().player
+    if player is None:
+        return
+
+    sub = float(delta.getGameTimeDeltaPartialTick(True))
+    cam = camera.pos
+
+    mv = RenderSystem.getModelViewStack()
+    mv.pushMatrix()
+    mv.set(camera.viewRotationMatrix)
+
+    if _debug_rays and _debug_eye is not None:
+        ox = float(_debug_eye.x - cam.x)
+        oy = float(_debug_eye.y - cam.y)
+        oz = float(_debug_eye.z - cam.z)
+        for (rex, rey, rez, status) in _debug_rays:
+            dex = float(rex - cam.x)
+            dey = float(rey - cam.y)
+            dez = float(rez - cam.z)
+            if status == 'candidate':
+                _draw_strand(ox, oy, oz, dex, dey, dez, 1.0, 255, 255, 255, 0)
+            elif status:
+                _draw_strand(ox, oy, oz, dex, dey, dez, 1.0, 200, 0, 255, 0)
+
+    if _attached and _anchor is not None:
+        hx, hy, hz = _get_hand_pos(player, sub)
+        sx = float(hx - cam.x)
+        sy = float(hy - cam.y)
+        sz = float(hz - cam.z)
+        ex = float(_anchor.x - cam.x)
+        ey = float(_anchor.y - cam.y)
+        ez = float(_anchor.z - cam.z)
+        t_interp = _prev_tension + (_tension - _prev_tension) * sub
+        _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, 255)
+    elif _zip_active and _zip_anchor_l is not None and _zip_anchor_r is not None:
+        lhx, lhy, lhz = _get_hand_pos(player, sub, 'left')
+        rhx, rhy, rhz = _get_hand_pos(player, sub, 'right')
+        _draw_strand(
+            float(lhx - cam.x), float(lhy - cam.y), float(lhz - cam.z),
+            float(_zip_anchor_l.x - cam.x), float(_zip_anchor_l.y - cam.y), float(_zip_anchor_l.z - cam.z),
+            1.0, 255)
+        _draw_strand(
+            float(rhx - cam.x), float(rhy - cam.y), float(rhz - cam.z),
+            float(_zip_anchor_r.x - cam.x), float(_zip_anchor_r.y - cam.y), float(_zip_anchor_r.z - cam.z),
+            1.0, 255)
+    elif _detached is not None:
+        r = _detached
+        sx = float(r[0] - cam.x)
+        sy = float(r[1] - cam.y)
+        sz = float(r[2] - cam.z)
+        ex = float((r[9] + (r[3] - r[9]) * sub) - cam.x)
+        ey = float((r[10] + (r[4] - r[10]) * sub) - cam.y)
+        ez = float((r[11] + (r[5] - r[11]) * sub) - cam.z)
+        t_interp = r[14] + (r[13] - r[14]) * sub
+        alpha = max(0, int(255 * (1.0 - (r[15] + sub) / 60.0)))
+        if alpha > 0:
+            _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha)
 
     mv.popMatrix()
 
 
 def web_tick(client):
     global _prev_use, _rope_length, _rope_ticks, _tension, _prev_tension, _was_airborne
-    global _zip_prev_key, _zip_cooldown, _zip_active, _zip_target, _zip_entity
+    global _zip_prev_key, _zip_cooldown, _zip_active, _zip_target, _zip_entity, _zip_holding
     player = client.player
     if player is None or client.isPaused():
         _prev_use = False
@@ -543,6 +689,7 @@ def web_tick(client):
         return
 
     _tick_detached(client)
+    _update_debug_cone(client)
 
     zip_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_Z)
     zip_just_pressed = zip_down and not _zip_prev_key
@@ -552,7 +699,12 @@ def web_tick(client):
         _zip_cooldown -= 1
 
     if _zip_active:
-        _tick_zip(player)
+        if _zip_holding:
+            if not zip_down:
+                _zip_holding = False
+                _zip_ticks = 0
+        else:
+            _tick_zip(player)
     elif zip_just_pressed and _zip_cooldown == 0 and not _attached:
         _try_zip(client)
 
