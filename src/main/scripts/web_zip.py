@@ -211,8 +211,20 @@ def zip_tick(client, player):
             vel = player.getDeltaMovement()
             player.setDeltaMovement(Vec3(float(vel.x) * 0.25, float(vel.y), float(vel.z) * 0.25))
             if not zip_down:
-                _zip_holding = False
-                _zip_ticks = 0
+                if not _zip_converging and _zip_entity is None:
+                    yaw_rad = math.radians(float(player.getYRot(1.0)))
+                    nx = -math.sin(yaw_rad)
+                    nz = math.cos(yaw_rad)
+                    player.setDeltaMovement(Vec3(nx * ZIP_BLOCK_SPEED * 4.0, 0.3, nz * ZIP_BLOCK_SPEED * 4.0))
+                    player.fallDistance = float32(0.0)
+                    _zip_active   = False
+                    _zip_target   = None
+                    _zip_anchor_l = None
+                    _zip_anchor_r = None
+                    _zip_cooldown = ZIP_COOLDOWN
+                else:
+                    _zip_holding = False
+                    _zip_ticks = 0
         else:
             _tick_zip(player)
     elif zip_just_pressed and _zip_cooldown == 0 and not _attached and not _tether_active:
