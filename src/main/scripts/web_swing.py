@@ -18,6 +18,7 @@ MoverType    = java.type("net.minecraft.world.entity.MoverType")
 Vec3             = java.type("net.minecraft.world.phys.Vec3")
 InputConstants   = java.type("com.mojang.blaze3d.platform.InputConstants")
 GLFW_KEY_Z       = 90
+GLFW_KEY_C       = 67
 
 WEB_ROPE_MIN         = 1.0
 CONSTRAINT_STIFFNESS = 0.2
@@ -30,6 +31,9 @@ ZIP_BLOCK_TICKS = 5
 ZIP_BLOCK_SPEED = 0.4
 ZIP_ENTITY_TICKS = 10
 ZIP_ENTITY_SPEED = 0.5
+
+TETHER_RANGE = 24.0
+TETHER_SPEED = 1.85
 
 RAPPEL_RAMP     = 8.0
 RAPPEL_SPEED    = 0.1
@@ -60,6 +64,13 @@ _zip_anchor_l   = None
 _zip_anchor_r   = None
 _zip_converging = True
 _zip_holding    = False
+
+_tether_active   = False
+_tether_anchor   = None
+_tether_length   = 0.0
+_tether_dir      = 1
+_tether_y        = 0.0
+_tether_prev_key = False
 
 _rappel_timer      = 0.0
 _rappel_prev_timer = 0.0
@@ -423,6 +434,101 @@ def _tick_zip(player):
     player.fallDistance = float32(0.0)
 
 
+def _try_tether(client):
+    global _tether_active, _tether_anchor, _tether_length, _tether_dir, _tether_y
+    player = client.player
+    level  = client.level
+    if player is None or level is None:
+        return
+
+    center_y = float(player.getY()) + float(player.getBbHeight()) / 2.0
+    origin = Vec3(float(player.getX()), center_y, float(player.getZ()))
+
+    best_hit  = None
+    best_dist = TETHER_RANGE + 1.0
+
+    for deg in range(0, 360, 5):
+        rad = math.radians(deg)
+        dx = math.cos(rad)
+        dz = math.sin(rad)
+        end = origin.add(dx * TETHER_RANGE, 0.0, dz * TETHER_RANGE)
+        hit = level.clip(ClipContext(origin, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+        if hit.getType() == HitType.BLOCK:
+            dist = float(origin.distanceTo(hit.getLocation()))
+            if dist < best_dist:
+                best_hit = hit.getLocation()
+                best_dist = dist
+
+    if best_hit is None:
+        return
+
+    _tether_anchor = Vec3(float(best_hit.x), center_y, float(best_hit.z))
+    _tether_length = best_dist
+    _tether_y = center_y - float(player.getBbHeight()) / 2.0
+    _tether_active = True
+
+    vel = player.getDeltaMovement()
+    rx = float(player.getX()) - float(_tether_anchor.x)
+    rz = float(player.getZ()) - float(_tether_anchor.z)
+    cross = rx * float(vel.z) - rz * float(vel.x)
+    if abs(cross) < 1.0e-4:
+        look = player.getViewVector(1.0)
+        cross = rx * float(look.z) - rz * float(look.x)
+    _tether_dir = 1 if cross >= 0 else -1
+
+    Logger.info("[tether] ATTACHED at ({},{}) r={} dir={}",
+                str(round(float(_tether_anchor.x), 1)),
+                str(round(float(_tether_anchor.z), 1)),
+                str(round(_tether_length, 1)),
+                str(_tether_dir))
+
+
+def _tick_tether(player):
+    global _tether_active, _tether_anchor
+
+    ax = float(_tether_anchor.x)
+    az = float(_tether_anchor.z)
+    px = float(player.getX())
+    pz = float(player.getZ())
+
+    dx = px - ax
+    dz = pz - az
+    dist = (dx * dx + dz * dz) ** 0.5
+
+    if dist < 0.1:
+        _tether_active = False
+        _tether_anchor = None
+        return
+
+    rx = dx / dist
+    rz = dz / dist
+
+    tx = -rz * _tether_dir
+    tz = rx * _tether_dir
+
+    vel = player.getDeltaMovement()
+    cur_tangent = float(vel.x) * tx + float(vel.z) * tz
+    speed = max(TETHER_SPEED, cur_tangent)
+    player.setDeltaMovement(Vec3(tx * speed, 0.08, tz * speed))
+
+    overshoot = dist - _tether_length
+    if abs(overshoot) > 0.01:
+        player.move(MoverType.SELF, Vec3(-rx * overshoot, 0.0, -rz * overshoot))
+
+    dy = _tether_y - float(player.getY())
+    if abs(dy) > 0.01:
+        player.move(MoverType.SELF, Vec3(0.0, dy, 0.0))
+
+    player.fallDistance = float32(0.0)
+
+
+def _detach_tether():
+    global _tether_active, _tether_anchor
+    Logger.info("[tether] DETACHED")
+    _tether_active = False
+    _tether_anchor = None
+
+
 def _tick_rappel(player):
     global _rappel_timer, _rappel_prev_timer, _rappel_direction, _rope_length
 
@@ -555,7 +661,7 @@ def _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha, cr=255, cg=255, cb=255
 
 
 def render_web_line(level_renderer, camera, delta):
-    if not _attached and not _zip_active and _detached is None:
+    if not _attached and not _zip_active and not _tether_active and _detached is None:
         return
     player = Minecraft.getInstance().player
     if player is None:
@@ -589,6 +695,15 @@ def render_web_line(level_renderer, camera, delta):
             float(rhx - cam.x), float(rhy - cam.y), float(rhz - cam.z),
             float(_zip_anchor_r.x - cam.x), float(_zip_anchor_r.y - cam.y), float(_zip_anchor_r.z - cam.z),
             1.0, 255)
+    elif _tether_active and _tether_anchor is not None:
+        hx, hy, hz = _get_hand_pos(player, sub)
+        sx = float(hx - cam.x)
+        sy = float(hy - cam.y)
+        sz = float(hz - cam.z)
+        ex = float(_tether_anchor.x - cam.x)
+        ey = float(_tether_anchor.y - cam.y)
+        ez = float(_tether_anchor.z - cam.z)
+        _draw_strand(sx, sy, sz, ex, ey, ez, 1.0, 255)
     elif _detached is not None:
         r = _detached
         sx = float(r[0] - cam.x)
@@ -608,13 +723,27 @@ def render_web_line(level_renderer, camera, delta):
 def web_tick(client):
     global _prev_use, _rope_length, _rope_ticks, _tension, _prev_tension, _was_airborne
     global _zip_prev_key, _zip_cooldown, _zip_active, _zip_target, _zip_entity, _zip_holding
+    global _tether_prev_key, _tether_active
     player = client.player
     if player is None or client.isPaused():
         _prev_use = False
         _zip_prev_key = False
+        _tether_prev_key = False
         return
 
     _tick_detached(client)
+
+    tether_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_C)
+    tether_just_pressed = tether_down and not _tether_prev_key
+    _tether_prev_key = tether_down
+
+    if _tether_active:
+        if not tether_down:
+            _detach_tether()
+        else:
+            _tick_tether(player)
+    elif tether_just_pressed and not _attached and not _zip_active:
+        _try_tether(client)
 
     zip_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_Z)
     zip_just_pressed = zip_down and not _zip_prev_key
@@ -630,7 +759,7 @@ def web_tick(client):
                 _zip_ticks = 0
         else:
             _tick_zip(player)
-    elif zip_just_pressed and _zip_cooldown == 0 and not _attached:
+    elif zip_just_pressed and _zip_cooldown == 0 and not _attached and not _tether_active:
         _try_zip(client)
 
     use = client.options.keyUse.isDown()
