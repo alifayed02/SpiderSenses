@@ -403,9 +403,15 @@ def _tick_zip(player):
         _zip_cooldown = ZIP_COOLDOWN
         return
 
-    nx = dx / dist
-    ny = dy / dist
-    nz = dz / dist
+    if _zip_converging or _zip_entity is not None:
+        nx = dx / dist
+        ny = dy / dist
+        nz = dz / dist
+    else:
+        yaw_rad = math.radians(float(player.getYRot(1.0)))
+        nx = -math.sin(yaw_rad)
+        ny = 0.0
+        nz = math.cos(yaw_rad)
 
     vel = player.getDeltaMovement()
     vy_boost = 0.15 if _zip_entity is None else 0.0
