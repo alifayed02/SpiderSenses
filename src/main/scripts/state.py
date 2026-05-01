@@ -83,6 +83,8 @@ def _threat_tick(client):
         dot = (delta.x * view_vec.x + delta.y * view_vec.y + delta.z * view_vec.z) / length
         if dot > COS_HALF_FOV:
             continue
+        if not player.hasLineOfSight(entity):
+            continue
         dist_sqr = entity.distanceToSqr(player)
         if dist_sqr < closest_sqr:
             closest_sqr = dist_sqr
