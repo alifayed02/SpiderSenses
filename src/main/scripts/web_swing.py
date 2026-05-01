@@ -1,4 +1,4 @@
-"""Web swinging – input detection, raycasting, pendulum physics, and line rendering."""
+"""Web swinging – shared imports, swing mechanics, and ability orchestration."""
 
 import java
 import math
@@ -25,16 +25,6 @@ CONSTRAINT_STIFFNESS = 0.2
 
 SEARCH_RANGE      = 48.0
 
-ZIP_RANGE       = 48.0
-ZIP_COOLDOWN    = 20
-ZIP_BLOCK_TICKS = 5
-ZIP_BLOCK_SPEED = 0.4
-ZIP_ENTITY_TICKS = 10
-ZIP_ENTITY_SPEED = 0.5
-
-TETHER_RANGE = 24.0
-TETHER_SPEED = 1.85
-
 RAPPEL_RAMP     = 8.0
 RAPPEL_SPEED    = 0.1
 RAPPEL_MIN_LEN  = 0.5
@@ -54,27 +44,12 @@ _in_ground     = False
 _was_airborne  = False
 _detached      = None
 
-_zip_active   = False
-_zip_target   = None
-_zip_entity   = None
-_zip_ticks    = 0
-_zip_cooldown = 0
-_zip_prev_key = False
-_zip_anchor_l   = None
-_zip_anchor_r   = None
-_zip_converging = True
-_zip_holding    = False
-
-_tether_active   = False
-_tether_anchor   = None
-_tether_length   = 0.0
-_tether_dir      = 1
-_tether_y        = 0.0
-_tether_prev_key = False
-
 _rappel_timer      = 0.0
 _rappel_prev_timer = 0.0
 _rappel_direction  = 0
+
+exec(open("src/main/scripts/web_zip.py").read())
+exec(open("src/main/scripts/web_tether.py").read())
 
 
 def prime():
@@ -260,275 +235,6 @@ def _apply_pendulum(player):
         player.fallDistance = float32(0.0)
 
 
-def _try_zip(client):
-    global _zip_active, _zip_target, _zip_entity, _zip_ticks
-    global _zip_anchor_l, _zip_anchor_r, _zip_converging, _zip_holding
-    player = client.player
-    level  = client.level
-    if player is None or level is None:
-        return
-
-    eye  = player.getEyePosition()
-    look = player.getViewVector(1.0)
-    end  = eye.add(look.x * ZIP_RANGE, look.y * ZIP_RANGE, look.z * ZIP_RANGE)
-
-    block_hit  = level.clip(ClipContext(eye, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
-    block_dist = ZIP_RANGE + 1.0
-    if block_hit.getType() == HitType.BLOCK:
-        block_dist = float(eye.distanceTo(block_hit.getLocation()))
-
-    search_box  = player.getBoundingBox().expandTowards(
-        look.x * ZIP_RANGE, look.y * ZIP_RANGE, look.z * ZIP_RANGE
-    ).inflate(1.0)
-    best_entity = None
-    best_dist   = block_dist
-
-    for entity in level.getEntities(player, search_box):
-        if not entity.isAlive() or not entity.isPickable():
-            continue
-        bb  = entity.getBoundingBox().inflate(float(entity.getPickRadius()) + 0.3)
-        clip = bb.clip(eye, end)
-        if clip.isPresent():
-            dist = float(eye.distanceTo(clip.get()))
-            if dist < best_dist:
-                best_entity = entity
-                best_dist   = dist
-
-    if best_entity is not None:
-        _zip_target = best_entity.position().add(0, float(best_entity.getBbHeight()) / 2.0, 0)
-        _zip_entity = best_entity
-        _zip_anchor_l = _zip_target
-        _zip_anchor_r = _zip_target
-        _zip_converging = True
-        _zip_holding = True
-        _zip_active = True
-        _zip_ticks  = 0
-        Logger.info("[web] ZIP entity at ({},{},{})",
-                    str(round(float(_zip_target.x), 1)),
-                    str(round(float(_zip_target.y), 1)),
-                    str(round(float(_zip_target.z), 1)))
-    elif block_hit.getType() == HitType.BLOCK:
-        _zip_target = block_hit.getLocation()
-        _zip_entity = None
-        _zip_anchor_l = _zip_target
-        _zip_anchor_r = _zip_target
-        _zip_converging = True
-        _zip_holding = True
-        _zip_active = True
-        _zip_ticks  = 0
-        Logger.info("[web] ZIP block at ({},{},{})",
-                    str(round(float(_zip_target.x), 1)),
-                    str(round(float(_zip_target.y), 1)),
-                    str(round(float(_zip_target.z), 1)))
-    else:
-        yaw_rad = math.radians(float(player.getYRot(1.0)))
-        best_l = None
-        best_l_score = -1.0
-        best_r = None
-        best_r_score = -1.0
-
-        for h_deg in list(range(-45, -3, 4)) + list(range(5, 46, 4)):
-            for p_deg in range(-20, 21, 5):
-                p_rad = math.radians(p_deg)
-                ray_yaw = yaw_rad + math.radians(h_deg)
-                dx = -math.sin(ray_yaw) * math.cos(p_rad)
-                dy = -math.sin(p_rad)
-                dz = math.cos(ray_yaw) * math.cos(p_rad)
-                ray_end = eye.add(dx * ZIP_RANGE, dy * ZIP_RANGE, dz * ZIP_RANGE)
-                hit = level.clip(ClipContext(eye, ray_end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
-                if hit.getType() != HitType.BLOCK:
-                    continue
-                dist = float(eye.distanceTo(hit.getLocation()))
-                score = 0.45 * (dist / ZIP_RANGE) + 0.35 * (abs(h_deg) / 45.0) + 0.2 * ((20.0 - p_deg) / 40.0)
-                if h_deg < 0 and score > best_l_score:
-                    best_l = hit.getLocation()
-                    best_l_score = score
-                elif h_deg > 0 and score > best_r_score:
-                    best_r = hit.getLocation()
-                    best_r_score = score
-
-        if best_l is not None and best_r is not None:
-            _zip_anchor_l = best_l
-            _zip_anchor_r = best_r
-            mid_x = (float(_zip_anchor_l.x) + float(_zip_anchor_r.x)) / 2.0
-            mid_y = (float(_zip_anchor_l.y) + float(_zip_anchor_r.y)) / 2.0
-            mid_z = (float(_zip_anchor_l.z) + float(_zip_anchor_r.z)) / 2.0
-            _zip_target = Vec3(mid_x, mid_y, mid_z)
-            _zip_entity = None
-            _zip_converging = False
-            _zip_holding = True
-            _zip_active = True
-            _zip_ticks = 0
-            Logger.info("[web] ZIP diverge L=({},{},{}) R=({},{},{})",
-                        str(round(float(_zip_anchor_l.x), 1)),
-                        str(round(float(_zip_anchor_l.y), 1)),
-                        str(round(float(_zip_anchor_l.z), 1)),
-                        str(round(float(_zip_anchor_r.x), 1)),
-                        str(round(float(_zip_anchor_r.y), 1)),
-                        str(round(float(_zip_anchor_r.z), 1)))
-
-
-def _tick_zip(player):
-    global _zip_active, _zip_target, _zip_entity, _zip_ticks, _zip_cooldown
-    global _zip_anchor_l, _zip_anchor_r
-    if not _zip_active:
-        return
-
-    _zip_ticks += 1
-    max_ticks = ZIP_ENTITY_TICKS if _zip_entity is not None else ZIP_BLOCK_TICKS
-    speed     = ZIP_ENTITY_SPEED if _zip_entity is not None else ZIP_BLOCK_SPEED
-
-    if _zip_ticks > max_ticks:
-        if _zip_entity is not None and _zip_entity.isAlive():
-            player.attack(_zip_entity)
-        _zip_active   = False
-        _zip_target   = None
-        _zip_entity   = None
-        _zip_anchor_l = None
-        _zip_anchor_r = None
-        _zip_cooldown = ZIP_COOLDOWN
-        return
-
-    if _zip_entity is not None and _zip_entity.isAlive():
-        _zip_target = _zip_entity.position().add(0, float(_zip_entity.getBbHeight()) / 2.0, 0)
-        _zip_anchor_l = _zip_target
-        _zip_anchor_r = _zip_target
-
-    px = float(player.getX())
-    py = float(player.getY())
-    pz = float(player.getZ())
-    tx = float(_zip_target.x)
-    ty = float(_zip_target.y)
-    tz = float(_zip_target.z)
-
-    dx = tx - px
-    dy = ty - py
-    dz = tz - pz
-    dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-    if dist < 0.5:
-        _zip_active   = False
-        _zip_target   = None
-        _zip_entity   = None
-        _zip_anchor_l = None
-        _zip_anchor_r = None
-        _zip_cooldown = ZIP_COOLDOWN
-        return
-
-    if _zip_converging or _zip_entity is not None:
-        nx = dx / dist
-        ny = dy / dist
-        nz = dz / dist
-    else:
-        yaw_rad = math.radians(float(player.getYRot(1.0)))
-        nx = -math.sin(yaw_rad)
-        ny = 0.0
-        nz = math.cos(yaw_rad)
-
-    vel = player.getDeltaMovement()
-    vy_boost = 0.15 if _zip_entity is None else 0.0
-    player.setDeltaMovement(Vec3(
-        float(vel.x) + nx * speed,
-        float(vel.y) + ny * speed + vy_boost,
-        float(vel.z) + nz * speed
-    ))
-    player.fallDistance = float32(0.0)
-
-
-def _try_tether(client):
-    global _tether_active, _tether_anchor, _tether_length, _tether_dir, _tether_y
-    player = client.player
-    level  = client.level
-    if player is None or level is None:
-        return
-
-    center_y = float(player.getY()) + float(player.getBbHeight()) / 2.0
-    origin = Vec3(float(player.getX()), center_y, float(player.getZ()))
-
-    best_hit  = None
-    best_dist = TETHER_RANGE + 1.0
-
-    for deg in range(0, 360, 5):
-        rad = math.radians(deg)
-        dx = math.cos(rad)
-        dz = math.sin(rad)
-        end = origin.add(dx * TETHER_RANGE, 0.0, dz * TETHER_RANGE)
-        hit = level.clip(ClipContext(origin, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
-        if hit.getType() == HitType.BLOCK:
-            dist = float(origin.distanceTo(hit.getLocation()))
-            if dist < best_dist:
-                best_hit = hit.getLocation()
-                best_dist = dist
-
-    if best_hit is None:
-        return
-
-    _tether_anchor = Vec3(float(best_hit.x), center_y, float(best_hit.z))
-    _tether_length = best_dist
-    _tether_y = center_y - float(player.getBbHeight()) / 2.0
-    _tether_active = True
-
-    vel = player.getDeltaMovement()
-    rx = float(player.getX()) - float(_tether_anchor.x)
-    rz = float(player.getZ()) - float(_tether_anchor.z)
-    cross = rx * float(vel.z) - rz * float(vel.x)
-    if abs(cross) < 1.0e-4:
-        look = player.getViewVector(1.0)
-        cross = rx * float(look.z) - rz * float(look.x)
-    _tether_dir = 1 if cross >= 0 else -1
-
-    Logger.info("[tether] ATTACHED at ({},{}) r={} dir={}",
-                str(round(float(_tether_anchor.x), 1)),
-                str(round(float(_tether_anchor.z), 1)),
-                str(round(_tether_length, 1)),
-                str(_tether_dir))
-
-
-def _tick_tether(player):
-    global _tether_active, _tether_anchor
-
-    ax = float(_tether_anchor.x)
-    az = float(_tether_anchor.z)
-    px = float(player.getX())
-    pz = float(player.getZ())
-
-    dx = px - ax
-    dz = pz - az
-    dist = (dx * dx + dz * dz) ** 0.5
-
-    if dist < 0.1:
-        _tether_active = False
-        _tether_anchor = None
-        return
-
-    rx = dx / dist
-    rz = dz / dist
-
-    tx = -rz * _tether_dir
-    tz = rx * _tether_dir
-
-    vel = player.getDeltaMovement()
-    cur_tangent = float(vel.x) * tx + float(vel.z) * tz
-    speed = max(TETHER_SPEED, cur_tangent)
-    player.setDeltaMovement(Vec3(tx * speed, 0.08, tz * speed))
-
-    overshoot = dist - _tether_length
-    if abs(overshoot) > 0.01:
-        player.move(MoverType.SELF, Vec3(-rx * overshoot, 0.0, -rz * overshoot))
-
-    dy = _tether_y - float(player.getY())
-    if abs(dy) > 0.01:
-        player.move(MoverType.SELF, Vec3(0.0, dy, 0.0))
-
-    player.fallDistance = float32(0.0)
-
-
-def _detach_tether():
-    global _tether_active, _tether_anchor
-    Logger.info("[tether] DETACHED")
-    _tether_active = False
-    _tether_anchor = None
-
-
 def _tick_rappel(player):
     global _rappel_timer, _rappel_prev_timer, _rappel_direction, _rope_length
 
@@ -684,83 +390,37 @@ def render_web_line(level_renderer, camera, delta):
         ez = float(_anchor.z - cam.z)
         t_interp = _prev_tension + (_tension - _prev_tension) * sub
         _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, 255)
-    elif _zip_active and _zip_anchor_l is not None and _zip_anchor_r is not None:
-        lhx, lhy, lhz = _get_hand_pos(player, sub, 'left')
-        rhx, rhy, rhz = _get_hand_pos(player, sub, 'right')
-        _draw_strand(
-            float(lhx - cam.x), float(lhy - cam.y), float(lhz - cam.z),
-            float(_zip_anchor_l.x - cam.x), float(_zip_anchor_l.y - cam.y), float(_zip_anchor_l.z - cam.z),
-            1.0, 255)
-        _draw_strand(
-            float(rhx - cam.x), float(rhy - cam.y), float(rhz - cam.z),
-            float(_zip_anchor_r.x - cam.x), float(_zip_anchor_r.y - cam.y), float(_zip_anchor_r.z - cam.z),
-            1.0, 255)
-    elif _tether_active and _tether_anchor is not None:
-        hx, hy, hz = _get_hand_pos(player, sub)
-        sx = float(hx - cam.x)
-        sy = float(hy - cam.y)
-        sz = float(hz - cam.z)
-        ex = float(_tether_anchor.x - cam.x)
-        ey = float(_tether_anchor.y - cam.y)
-        ez = float(_tether_anchor.z - cam.z)
-        _draw_strand(sx, sy, sz, ex, ey, ez, 1.0, 255)
-    elif _detached is not None:
-        r = _detached
-        sx = float(r[0] - cam.x)
-        sy = float(r[1] - cam.y)
-        sz = float(r[2] - cam.z)
-        ex = float((r[9] + (r[3] - r[9]) * sub) - cam.x)
-        ey = float((r[10] + (r[4] - r[10]) * sub) - cam.y)
-        ez = float((r[11] + (r[5] - r[11]) * sub) - cam.z)
-        t_interp = r[14] + (r[13] - r[14]) * sub
-        alpha = max(0, int(255 * (1.0 - (r[15] + sub) / 60.0)))
-        if alpha > 0:
-            _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha)
+    else:
+        zip_render(player, sub, cam)
+        tether_render(player, sub, cam)
+        if _detached is not None:
+            r = _detached
+            sx = float(r[0] - cam.x)
+            sy = float(r[1] - cam.y)
+            sz = float(r[2] - cam.z)
+            ex = float((r[9] + (r[3] - r[9]) * sub) - cam.x)
+            ey = float((r[10] + (r[4] - r[10]) * sub) - cam.y)
+            ez = float((r[11] + (r[5] - r[11]) * sub) - cam.z)
+            t_interp = r[14] + (r[13] - r[14]) * sub
+            alpha = max(0, int(255 * (1.0 - (r[15] + sub) / 60.0)))
+            if alpha > 0:
+                _draw_strand(sx, sy, sz, ex, ey, ez, t_interp, alpha)
 
     mv.popMatrix()
 
 
 def web_tick(client):
     global _prev_use, _rope_length, _rope_ticks, _tension, _prev_tension, _was_airborne
-    global _zip_prev_key, _zip_cooldown, _zip_active, _zip_target, _zip_entity, _zip_holding
-    global _tether_prev_key, _tether_active
     player = client.player
     if player is None or client.isPaused():
         _prev_use = False
-        _zip_prev_key = False
-        _tether_prev_key = False
+        zip_reset_keys()
+        tether_reset_keys()
         return
 
     _tick_detached(client)
-
-    tether_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_C)
-    tether_just_pressed = tether_down and not _tether_prev_key
-    _tether_prev_key = tether_down
-
-    if _tether_active:
-        if not tether_down:
-            _detach_tether()
-        else:
-            _tick_tether(player)
-    elif tether_just_pressed and not _attached and not _zip_active:
-        _try_tether(client)
-
-    zip_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_Z)
-    zip_just_pressed = zip_down and not _zip_prev_key
-    _zip_prev_key = zip_down
-
-    if _zip_cooldown > 0:
-        _zip_cooldown -= 1
-
-    if _zip_active:
-        if _zip_holding:
-            if not zip_down:
-                _zip_holding = False
-                _zip_ticks = 0
-        else:
-            _tick_zip(player)
-    elif zip_just_pressed and _zip_cooldown == 0 and not _attached and not _tether_active:
-        _try_zip(client)
+    tether_tick(client, player)
+    zip_tick(client, player)
 
     use = client.options.keyUse.isDown()
     just_pressed  = use and not _prev_use
@@ -804,5 +464,5 @@ def web_tick(client):
             target = 1.0
         _tension = _tension - (_tension - target) / 4.0
 
-    elif just_pressed and not _zip_active:
+    elif just_pressed and not _zip_active and not _tether_active:
         _try_shoot(client)
