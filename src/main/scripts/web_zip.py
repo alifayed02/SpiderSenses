@@ -5,9 +5,9 @@ import math
 ZIP_RANGE       = 48.0
 ZIP_COOLDOWN    = 20
 ZIP_BLOCK_TICKS = 5
-ZIP_BLOCK_SPEED = 0.4
+ZIP_BLOCK_SPEED = 1.5
 ZIP_ENTITY_TICKS = 10
-ZIP_ENTITY_SPEED = 0.5
+ZIP_ENTITY_SPEED = 1.5
 
 _zip_active     = False
 _zip_target     = None
@@ -136,10 +136,14 @@ def _tick_zip(player):
         return
 
     _zip_ticks += 1
-    max_ticks = ZIP_ENTITY_TICKS if _zip_entity is not None else ZIP_BLOCK_TICKS
-    speed     = ZIP_ENTITY_SPEED if _zip_entity is not None else ZIP_BLOCK_SPEED
+    speed = ZIP_ENTITY_SPEED if _zip_entity is not None else ZIP_BLOCK_SPEED
 
-    if _zip_ticks > max_ticks:
+    if _zip_entity is not None and _zip_entity.isAlive():
+        _zip_target = _zip_entity.position().add(0, float(_zip_entity.getBbHeight()) / 2.0, 0)
+        _zip_anchor_l = _zip_target
+        _zip_anchor_r = _zip_target
+
+    if _zip_ticks > 2 and (player.horizontalCollision or player.verticalCollision):
         if _zip_entity is not None and _zip_entity.isAlive():
             player.attack(_zip_entity)
         _zip_active   = False
@@ -148,6 +152,7 @@ def _tick_zip(player):
         _zip_anchor_l = None
         _zip_anchor_r = None
         _zip_cooldown = ZIP_COOLDOWN
+        player.setDeltaMovement(Vec3(0.0, 0.0, 0.0))
         return
 
     if _zip_entity is not None and _zip_entity.isAlive():
@@ -166,13 +171,14 @@ def _tick_zip(player):
     dy = ty - py
     dz = tz - pz
     dist = (dx * dx + dy * dy + dz * dz) ** 0.5
-    if dist < 0.5:
+    if dist < 0.1:
         _zip_active   = False
         _zip_target   = None
         _zip_entity   = None
         _zip_anchor_l = None
         _zip_anchor_r = None
         _zip_cooldown = ZIP_COOLDOWN
+        player.setDeltaMovement(Vec3(0.0, 0.0, 0.0))
         return
 
     if _zip_converging or _zip_entity is not None:
@@ -185,13 +191,8 @@ def _tick_zip(player):
         ny = 0.0
         nz = math.cos(yaw_rad)
 
-    vel = player.getDeltaMovement()
-    vy_boost = 0.15 if _zip_entity is None else 0.0
-    player.setDeltaMovement(Vec3(
-        float(vel.x) + nx * speed,
-        float(vel.y) + ny * speed + vy_boost,
-        float(vel.z) + nz * speed
-    ))
+    pull_speed = min(speed, dist)
+    player.setDeltaMovement(Vec3(nx * pull_speed, ny * pull_speed, nz * pull_speed))
     player.fallDistance = float32(0.0)
 
 
