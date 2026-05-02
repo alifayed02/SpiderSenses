@@ -10,25 +10,48 @@ WALL_JUMP_VERTICAL = 0.5
 WALL_RUN_GRAVITY = 0.008
 WALL_RUN_SLIDE_MAX = -0.15
 WALL_RUN_MAX_TICKS = 60
-WALL_CLIMB_MAX_TICKS = 400
 WALL_STICK_DIST = 0.3
+WALL_CLIMB_NO_CONTACT_MAX = 5
+WALL_CLIMB_STICK = 0.15
+WALL_CLIMB_SCAN = 1.5
 
 GLFW_KEY_R = 82
 
 _wall_active = False
 _wall_mode = None
-_wall_anchor = None
 _wall_normal = None
 _wall_ticks = 0
 _wall_prev_key = False
 _wall_prev_jump = False
 _wall_cooldown = 0
-_wall_y_speed = 0.0
+_wall_run_y_speed = 0.0
+_wall_no_contact = 0
+_wall_anim_pos = 0.0
+_wall_anim_speed = 0.0
+
+
+def _player_facing_xz(player):
+    """Player's horizontal facing direction in world space."""
+    yaw_rad = math.radians(float(player.getYRot(1.0)))
+    return -math.sin(yaw_rad), math.cos(yaw_rad)
+
+
+def _player_center(player):
+    """Vec3 at the player's vertical mid-point."""
+    cy = float(player.getY()) + float(player.getBbHeight()) / 2.0
+    return Vec3(float(player.getX()), cy, float(player.getZ()))
+
+
+def _other_web_active():
+    """Whether another web ability is currently in use."""
+    try:
+        return _attached or _zip_active or _tether_active
+    except NameError:
+        return False
 
 
 def _find_wall(player, level, max_range):
-    center_y = float(player.getY()) + float(player.getBbHeight()) / 2.0
-    origin = Vec3(float(player.getX()), center_y, float(player.getZ()))
+    origin = _player_center(player)
 
     best_hit = None
     best_dist = max_range + 1.0
@@ -37,9 +60,7 @@ def _find_wall(player, level, max_range):
 
     for deg in range(0, 360, 10):
         rad = math.radians(deg)
-        dx = math.cos(rad)
-        dz = math.sin(rad)
-        end = origin.add(dx * max_range, 0.0, dz * max_range)
+        end = origin.add(math.cos(rad) * max_range, 0.0, math.sin(rad) * max_range)
         hit = level.clip(ClipContext(origin, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
         if hit.getType() != HitType.BLOCK:
             continue
@@ -47,9 +68,7 @@ def _find_wall(player, level, max_range):
         fnx = float(int(face.getStepX()))
         fny = float(int(face.getStepY()))
         fnz = float(int(face.getStepZ()))
-        if fny != 0.0:
-            continue
-        if fnx == 0.0 and fnz == 0.0:
+        if fny != 0.0 or (fnx == 0.0 and fnz == 0.0):
             continue
         dist = float(origin.distanceTo(hit.getLocation()))
         if dist < best_dist:
@@ -64,14 +83,14 @@ def _find_wall(player, level, max_range):
 
 
 def _attach_wall(player, hit_loc, nx, nz, mode):
-    global _wall_active, _wall_anchor, _wall_normal, _wall_mode
-    global _wall_ticks, _wall_y_speed
+    global _wall_active, _wall_normal, _wall_mode
+    global _wall_ticks, _wall_run_y_speed, _wall_no_contact
 
-    _wall_anchor = hit_loc
     _wall_normal = (nx, nz)
     _wall_mode = mode
     _wall_ticks = 0
-    _wall_y_speed = 0.0
+    _wall_run_y_speed = 0.0
+    _wall_no_contact = 0
     _wall_active = True
 
     if mode == 'run':
@@ -85,10 +104,9 @@ def _attach_wall(player, hit_loc, nx, nz, mode):
 
 
 def _detach_wall(reason):
-    global _wall_active, _wall_anchor, _wall_normal, _wall_mode
+    global _wall_active, _wall_normal, _wall_mode
     Logger.info("[wall] DETACHED reason={} mode={} ticks={}", reason, str(_wall_mode), str(_wall_ticks))
     _wall_active = False
-    _wall_anchor = None
     _wall_normal = None
     _wall_mode = None
 
@@ -96,17 +114,24 @@ def _detach_wall(reason):
 def _wall_jump(player):
     global _wall_cooldown
 
-    nx, nz = _wall_normal
+    level = Minecraft.getInstance().level
+    if _wall_mode == 'climb' and level is not None:
+        result = _find_wall(player, level, WALL_DETECT_RANGE)
+        if result is not None:
+            nx, nz = result[1], result[2]
+        else:
+            nx, nz = _wall_normal if _wall_normal is not None else (0.0, 0.0)
+    elif _wall_normal is not None:
+        nx, nz = _wall_normal
+    else:
+        nx, nz = 0.0, 0.0
 
     kp = player.input.keyPresses
     fwd = 1.0 if kp.forward() else (-1.0 if kp.backward() else 0.0)
     strafe = 1.0 if kp.left() else (-1.0 if kp.right() else 0.0)
-    has_input = abs(fwd) > 0.01 or abs(strafe) > 0.01
 
-    if has_input:
-        yaw_rad = math.radians(float(player.getYRot(1.0)))
-        fx = -math.sin(yaw_rad)
-        fz = math.cos(yaw_rad)
+    if abs(fwd) > 0.01 or abs(strafe) > 0.01:
+        fx, fz = _player_facing_xz(player)
         ix = fx * fwd + fz * strafe
         iz = fz * fwd + (-fx) * strafe
         mag = (ix * ix + iz * iz) ** 0.5
@@ -174,22 +199,95 @@ def _get_wall_velocity(player):
     return mx, my, mz
 
 
-def _tick_wall(player):
-    global _wall_ticks, _wall_y_speed, _wall_anchor
+def _scan_closest_wall(player, level):
+    """Per-tick 4-cardinal raycast to find the closest wall face. Returns (nx, nz) or None."""
+    origin = _player_center(player)
+    best_dist = WALL_CLIMB_SCAN + 0.1
+    best = None
 
-    _wall_ticks += 1
+    for cnx, cnz in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+        end = origin.add(-cnx * WALL_CLIMB_SCAN, 0.0, -cnz * WALL_CLIMB_SCAN)
+        hit = level.clip(ClipContext(origin, end, ClipBlock.COLLIDER, ClipFluid.NONE, player))
+        if hit.getType() == HitType.BLOCK:
+            d = float(origin.distanceTo(hit.getLocation()))
+            if d < best_dist:
+                best_dist = d
+                best = (cnx, cnz)
+    return best
 
-    if _wall_mode == 'run' and _wall_ticks > WALL_RUN_MAX_TICKS:
+
+def _advance_climb_anim(player):
+    """Drive walkAnimationPos/Speed from full 3D velocity so vertical motion animates."""
+    global _wall_anim_pos, _wall_anim_speed
+    vel = player.getDeltaMovement()
+    speed_3d = (float(vel.x) ** 2 + float(vel.y) ** 2 + float(vel.z) ** 2) ** 0.5
+    target = min(speed_3d * 4.0, 1.0)
+    _wall_anim_speed += (target - _wall_anim_speed) * 0.4
+    _wall_anim_pos += _wall_anim_speed
+
+
+def _tick_wall_climb(player):
+    """Spiders 2.0-inspired climbing: per-tick closest-face scan + sticking force."""
+    global _wall_no_contact, _wall_normal
+
+    level = Minecraft.getInstance().level
+    closest = _scan_closest_wall(player, level)
+    if closest is None:
+        _wall_no_contact += 1
+        if _wall_no_contact > WALL_CLIMB_NO_CONTACT_MAX:
+            _detach_wall("no_wall")
+            return
+    else:
+        _wall_no_contact = 0
+        _wall_normal = closest
+        nx, nz = closest
+        player.move(MoverType.SELF, Vec3(-nx * WALL_CLIMB_STICK, 0.0, -nz * WALL_CLIMB_STICK))
+
+    kp = player.input.keyPresses
+    w, s, a, d = kp.forward(), kp.backward(), kp.left(), kp.right()
+
+    if w or s or a or d:
+        speed = 0.2
+        fx, fz = _player_facing_xz(player)
+        ix, iy, iz = 0.0, 0.0, 0.0
+        if a:
+            ix += fz
+            iz += -fx
+        if d:
+            ix += -fz
+            iz += fx
+        if w:
+            iy += 1.0
+        if s:
+            iy -= 1.0
+
+        mag = (ix * ix + iy * iy + iz * iz) ** 0.5
+        if mag > 1e-6:
+            ix /= mag
+            iy /= mag
+            iz /= mag
+
+        player.setDeltaMovement(Vec3(ix * speed, iy * speed, iz * speed))
+    else:
+        player.setDeltaMovement(Vec3(0.0, 0.0, 0.0))
+
+    player.fallDistance = float32(0.0)
+    _advance_climb_anim(player)
+
+
+def _tick_wall_run(player):
+    """Wall-run mode: raycast-based with look-relative WASD."""
+    global _wall_run_y_speed
+
+    if _wall_ticks > WALL_RUN_MAX_TICKS:
         _detach_wall("max_ticks")
         return
-
-    if _wall_mode == 'run' and player.onGround() and _wall_ticks > 3:
+    if player.onGround() and _wall_ticks > 3:
         _detach_wall("ground")
         return
 
     nx, nz = _wall_normal
-    center_y = float(player.getY()) + float(player.getBbHeight()) / 2.0
-    origin = Vec3(float(player.getX()), center_y, float(player.getZ()))
+    origin = _player_center(player)
     check_end = origin.add(-nx * WALL_DETECT_RANGE, 0.0, -nz * WALL_DETECT_RANGE)
 
     level = Minecraft.getInstance().level
@@ -198,45 +296,80 @@ def _tick_wall(player):
         _detach_wall("no_wall")
         return
 
-    _wall_anchor = hit.getLocation()
-    wall_dist = float(origin.distanceTo(_wall_anchor))
-
+    wall_dist = float(origin.distanceTo(hit.getLocation()))
     correction = WALL_STICK_DIST - wall_dist
     if abs(correction) > 0.01:
         player.move(MoverType.SELF, Vec3(nx * correction, 0.0, nz * correction))
 
-    if _wall_mode == 'climb':
-        vel = player.getDeltaMovement()
-        vx = max(-0.15, min(0.15, float(vel.x)))
-        vy = float(vel.y)
-        vz = max(-0.15, min(0.15, float(vel.z)))
-
-        if player.horizontalCollision:
-            vy = 0.2
-
-        vy = max(-0.15, vy)
-
-        if player.isShiftKeyDown() and vy < 0:
-            vy = 0.0
-
-        player.setDeltaMovement(Vec3(vx, vy, vz))
-    else:
-        mx, my, mz = _get_wall_velocity(player)
-        speed = WALL_MOVE_SPEED
-        vx = mx * speed
-        vz = mz * speed
-        _wall_y_speed -= WALL_RUN_GRAVITY
-        if _wall_y_speed < WALL_RUN_SLIDE_MAX:
-            _wall_y_speed = WALL_RUN_SLIDE_MAX
-        vy = 0.08 + my * speed + _wall_y_speed
-        player.setDeltaMovement(Vec3(vx, vy, vz))
-
+    mx, my, mz = _get_wall_velocity(player)
+    speed = WALL_MOVE_SPEED
+    _wall_run_y_speed -= WALL_RUN_GRAVITY
+    if _wall_run_y_speed < WALL_RUN_SLIDE_MAX:
+        _wall_run_y_speed = WALL_RUN_SLIDE_MAX
+    vy = 0.08 + my * speed + _wall_run_y_speed
+    player.setDeltaMovement(Vec3(mx * speed, vy, mz * speed))
     player.fallDistance = float32(0.0)
 
 
+def _handle_attached(player, r_just_pressed):
+    global _wall_mode, _wall_run_y_speed, _wall_ticks, _wall_prev_jump
+
+    if r_just_pressed:
+        if _wall_mode == 'run':
+            _wall_mode = 'climb'
+            _wall_run_y_speed = 0.0
+            _wall_ticks = 0
+            Logger.info("[wall] SWITCHED to CLIMB")
+        else:
+            _detach_wall("r_key")
+            return
+
+    kp = player.input.keyPresses
+    jump_down = kp.jump()
+    jump_just_pressed = jump_down and not _wall_prev_jump
+    _wall_prev_jump = jump_down
+
+    if jump_just_pressed:
+        _wall_jump(player)
+        return
+
+    _wall_ticks += 1
+    if _wall_mode == 'climb':
+        _tick_wall_climb(player)
+    else:
+        _tick_wall_run(player)
+
+
+def _handle_detached(client, player, r_just_pressed):
+    global _wall_prev_jump
+    _wall_prev_jump = False
+
+    if _other_web_active():
+        return
+    level = client.level
+    if level is None:
+        return
+
+    if r_just_pressed:
+        result = _find_wall(player, level, WALL_CLIMB_DETECT)
+        if result is not None:
+            _attach_wall(player, result[0], result[1], result[2], 'climb')
+        return
+
+    if (not player.onGround() and player.horizontalCollision
+            and _wall_cooldown == 0):
+        vel = player.getDeltaMovement()
+        h_speed = (float(vel.x) ** 2 + float(vel.z) ** 2) ** 0.5
+        if h_speed >= 0.2:
+            Logger.info("[wall] AUTO-RUN trigger: hSpeed={} vy={}",
+                        str(round(h_speed, 3)), str(round(float(vel.y), 3)))
+            result = _find_wall(player, level, WALL_DETECT_RANGE)
+            if result is not None:
+                _attach_wall(player, result[0], result[1], result[2], 'run')
+
+
 def wall_tick(client, player):
-    global _wall_prev_key, _wall_prev_jump, _wall_cooldown
-    global _wall_mode, _wall_ticks, _wall_y_speed
+    global _wall_prev_key, _wall_cooldown
 
     r_down = InputConstants.isKeyDown(Minecraft.getInstance().getWindow(), GLFW_KEY_R)
     r_just_pressed = r_down and not _wall_prev_key
@@ -246,50 +379,9 @@ def wall_tick(client, player):
         _wall_cooldown -= 1
 
     if _wall_active:
-        if r_just_pressed:
-            if _wall_mode == 'run':
-                _wall_mode = 'climb'
-                _wall_y_speed = 0.0
-                _wall_ticks = 0
-                Logger.info("[wall] SWITCHED to CLIMB")
-            else:
-                _detach_wall("r_key")
-                return
-
-        kp = player.input.keyPresses
-        jump_down = kp.jump()
-        jump_just_pressed = jump_down and not _wall_prev_jump
-        _wall_prev_jump = jump_down
-
-        if jump_just_pressed:
-            _wall_jump(player)
-            return
-
-        _tick_wall(player)
+        _handle_attached(player, r_just_pressed)
     else:
-        _wall_prev_jump = False
-
-        if (r_just_pressed
-                and not _attached and not _zip_active and not _tether_active):
-            level = client.level
-            if level is not None:
-                result = _find_wall(player, level, WALL_CLIMB_DETECT)
-                if result is not None:
-                    _attach_wall(player, result[0], result[1], result[2], 'climb')
-
-        elif (not player.onGround() and player.horizontalCollision
-                and _wall_cooldown == 0
-                and not _attached and not _zip_active and not _tether_active):
-            vel = player.getDeltaMovement()
-            h_speed = (float(vel.x) ** 2 + float(vel.z) ** 2) ** 0.5
-            if h_speed >= 0.2:
-                Logger.info("[wall] AUTO-RUN trigger: hSpeed={} vy={}",
-                            str(round(h_speed, 3)), str(round(float(vel.y), 3)))
-                level = client.level
-                if level is not None:
-                    result = _find_wall(player, level, WALL_DETECT_RANGE)
-                    if result is not None:
-                        _attach_wall(player, result[0], result[1], result[2], 'run')
+        _handle_detached(client, player, r_just_pressed)
 
 
 def wall_reset_keys():
