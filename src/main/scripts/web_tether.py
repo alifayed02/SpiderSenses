@@ -2,6 +2,8 @@
 
 import math
 
+GLFW_KEY_C = 67
+
 TETHER_RANGE = 24.0
 TETHER_SPEED = 1.85
 

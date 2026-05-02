@@ -2,6 +2,8 @@
 
 import math
 
+GLFW_KEY_Z = 90
+
 ZIP_RANGE       = 48.0
 ZIP_COOLDOWN    = 20
 ZIP_BLOCK_TICKS = 5
